@@ -1,0 +1,107 @@
+{
+  "_comment": "音乐推荐视频歌单配置 — 由 download.py 下载素材后自动补全 file_path",
+  "output_sequence_name": "Our Love Is Alive",
+  "resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "fps": 30,
+  "songs": [
+    {
+      "title": "it brings back memories. though there was nothing in those days, \"nothingness\" was still there.",
+      "artist": "samebeam",
+      "album": "CAR CRASH AND SIREN",
+      "youtube_url": "",
+      "start": "0:45",
+      "end": "1:30",
+      "file_path": "D:\\prworks\\music-rec-video\\raw\\samebeam_it_brings_back_memories__though_there_was_nothing_in_those_days___nothingness__was_still_there_.mp4",
+      "reason": "《it brings back memories. though there was nothing in those days, \"nothingness\" was still there.》推荐：旋律抓耳，编曲精湛。",
+      "has_file": true,
+      "file_size_mb": 14.16
+    },
+    {
+      "title": "ピュア (feat. 橋本絵莉子)",
+      "artist": "PAS TASTA / 橋本絵莉子",
+      "album": "ピュア",
+      "youtube_url": "",
+      "start": "0:45",
+      "end": "1:30",
+      "file_path": "D:\\prworks\\music-rec-video\\raw\\PAS_TASTA___橋本絵莉子_ピュア__feat__橋本絵莉子_.mp4",
+      "reason": "《ピュア (feat. 橋本絵莉子)》推荐：旋律抓耳，编曲精湛。",
+      "has_file": true,
+      "file_size_mb": 41.48
+    },
+    {
+      "title": "Our Love Is Alive",
+      "artist": "The Avalanches / Suzanne Ciani / Barry Can't Swim",
+      "album": "No Bad Memories",
+      "youtube_url": "",
+      "start": "0:45",
+      "end": "1:30",
+      "file_path": "D:\\prworks\\music-rec-video\\raw\\The_Avalanches___Suzanne_Ciani___Barry_Can_t_Swim_Our_Love_Is_Alive.mp4",
+      "reason": "《Our Love Is Alive》推荐：旋律抓耳，编曲精湛。",
+      "has_file": true,
+      "file_size_mb": 48.94
+    },
+    {
+      "title": "B Who I Want 2 B",
+      "artist": "安室奈美恵 / 初音ミク",
+      "album": "_genic",
+      "youtube_url": "https://www.bilibili.com/video/BV1LBL86XEkt/?share_source=copy_web&vd_source=17e641db0f806da48e4ca6f1be9f3f16",
+      "start": "0:45",
+      "end": "1:30",
+      "file_path": "d:\\prworks\\music-rec-video\\raw\\安室奈美恵___初音ミク_B_Who_I_Want_2_B.mp4",
+      "reason": "《B Who I Want 2 B》推荐：旋律抓耳，编曲精湛。",
+      "has_file": true,
+      "file_size_mb": 86.06
+    },
+    {
+      "title": "joy",
+      "artist": "レイ・ハラカミ",
+      "album": "lust",
+      "youtube_url": "",
+      "start": "0:45",
+      "end": "1:30",
+      "file_path": "D:\\prworks\\music-rec-video\\raw\\レイ_ハラカミ_joy.mp4",
+      "reason": "《joy》推荐：旋律抓耳，编曲精湛。",
+      "has_file": true,
+      "file_size_mb": 5.46
+    },
+    {
+      "title": "Summer Fling",
+      "artist": "leroy / Jane Remover",
+      "album": "status update music",
+      "youtube_url": "",
+      "start": "0:45",
+      "end": "1:30",
+      "file_path": "D:\\prworks\\music-rec-video\\raw\\leroy___Jane_Remover_Summer_Fling.mp4",
+      "reason": "《Summer Fling》推荐：旋律抓耳，编曲精湛。",
+      "has_file": true,
+      "file_size_mb": 8.4
+    },
+    {
+      "title": "わをん",
+      "artist": "にしな",
+      "album": "わをん",
+      "youtube_url": "",
+      "start": "0:45",
+      "end": "1:30",
+      "file_path": "D:\\prworks\\music-rec-video\\raw\\にしな_わをん.mp4",
+      "reason": "《わをん》推荐：旋律抓耳，编曲精湛。",
+      "has_file": true,
+      "file_size_mb": 59.77
+    },
+    {
+      "title": "グッドバイ",
+      "artist": "サカナクション",
+      "album": "グッドバイ／ユリイカ",
+      "youtube_url": "",
+      "start": "0:45",
+      "end": "1:30",
+      "file_path": "D:\\prworks\\music-rec-video\\raw\\サカナクション_グッドバイ.mp4",
+      "reason": "《グッドバイ》推荐：旋律抓耳，编曲精湛。",
+      "has_file": true,
+      "file_size_mb": 51.18
+    }
+  ]
+}

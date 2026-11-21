@@ -1,0 +1,31 @@
+{
+  "_comment": "音乐推荐视频歌单配置模板 — 可手动编辑，亦可通过 netease.py 或 Web 界面一键导入",
+  "output_sequence_name": "音乐推荐合辑",
+  "resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "fps": 30,
+  "songs": [
+    {
+      "title": "夜曲",
+      "artist": "周杰伦",
+      "album": "十一月的萧邦",
+      "youtube_url": "https://www.bilibili.com/video/BV1Ek4y1r7Rg",
+      "start": "0:45",
+      "end": "1:30",
+      "file_path": "",
+      "reason": "《夜曲》推荐：古典钢琴与流行说唱的极致融合，前奏响起即是青春。"
+    },
+    {
+      "title": "Blinding Lights",
+      "artist": "The Weeknd",
+      "album": "After Hours",
+      "youtube_url": "https://www.youtube.com/watch?v=4NRXx6U8ABQ",
+      "start": "0:30",
+      "end": "1:15",
+      "file_path": "",
+      "reason": "《Blinding Lights》推荐：充满80年代复古霓虹气息的合成器浪潮，旋律抓耳动感。"
+    }
+  ]
+}
