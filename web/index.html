@@ -199,6 +199,22 @@
                 待选视频方案
               </span>
 
+              <!-- Reorder Buttons -->
+              <div class="flex items-center space-x-1">
+                <button
+                  @click="moveSong(idx, -1)"
+                  :disabled="idx === 0"
+                  title="上移"
+                  class="px-2 py-1 text-xs rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 text-zinc-300 border border-zinc-700 transition"
+                >↑</button>
+                <button
+                  @click="moveSong(idx, 1)"
+                  :disabled="idx === playlist.songs.length - 1"
+                  title="下移"
+                  class="px-2 py-1 text-xs rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 text-zinc-300 border border-zinc-700 transition"
+                >↓</button>
+              </div>
+
               <!-- Single Download Button -->
               <button 
                 @click="downloadSingle(idx)"
@@ -594,6 +610,23 @@
           }
         };
 
+        const moveSong = async (idx, delta) => {
+          const target = idx + delta;
+          const songs = playlist.value.songs;
+          if (target < 0 || target >= songs.length) return;
+          const tmp = songs[idx];
+          songs[idx] = songs[target];
+          songs[target] = tmp;
+
+          for (const mapRef of [candidatesMap, platformMap, customQueries, loadingCandidates]) {
+            const vA = mapRef.value[idx];
+            const vB = mapRef.value[target];
+            if (vB !== undefined) mapRef.value[idx] = vB; else delete mapRef.value[idx];
+            if (vA !== undefined) mapRef.value[target] = vA; else delete mapRef.value[target];
+          }
+          await savePlaylist();
+        };
+
         const searchCandidates = async (idx) => {
           const song = playlist.value.songs[idx];
           const query = customQueries.value[idx] || getDefaultQuery(song);
@@ -746,6 +779,7 @@
           downloadAll,
           preprocessAll,
           renderSpecialAll,
+          moveSong,
           savePlaylist,
           submitNetease,
         };
