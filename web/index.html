@@ -496,6 +496,7 @@
 
         const downloadSingle = async (idx) => {
           try {
+            await savePlaylist();
             const res = await fetch('/api/download_single', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -515,6 +516,7 @@
         const downloadAll = async () => {
           if (confirm('是否以 1080p 画质下载全部已选定方案的歌曲素材？')) {
             try {
+              await savePlaylist();
               const res = await fetch('/api/download_all', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -563,26 +565,32 @@
           }
         };
 
+        let pollTimer = null;
+
         const pollStatus = async () => {
+          if (pollTimer) {
+            clearTimeout(pollTimer);
+            pollTimer = null;
+          }
+          const wasDownloading = status.value.is_downloading;
           try {
             const res = await fetch('/api/status');
             status.value = await res.json();
-            if (status.value.is_downloading) {
-              setTimeout(pollStatus, 2000);
-            } else {
-              // Refresh playlist data once downloading concludes
-              loadPlaylistData();
+            if (wasDownloading && !status.value.is_downloading) {
+              // Refresh playlist data only when downloading just concluded
+              await loadPlaylistData();
             }
           } catch (e) {
             console.error('Status poll error:', e);
+          } finally {
+            const delay = status.value.is_downloading ? 2000 : 4000;
+            pollTimer = setTimeout(pollStatus, delay);
           }
         };
 
         onMounted(() => {
           loadPlaylistData();
           pollStatus();
-          // Poll status every 4 seconds in background
-          setInterval(pollStatus, 4000);
         });
 
         return {

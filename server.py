@@ -22,7 +22,7 @@ from pydantic import BaseModel
 import uvicorn
 import yt_dlp
 
-from download import download_mv, slug, RAW_DIR
+from download import download_mv, slug, RAW_DIR, resolve_file_path, to_relative_path
 from netease import import_netease_playlist
 from bilibili import search_bilibili
 
@@ -75,7 +75,15 @@ def load_playlist() -> dict:
 
 
 def save_playlist(data: dict):
-    """Save playlist.json to disk."""
+    """Save playlist.json to disk, normalizing local file_path entries to portable relative paths."""
+    for song in data.get("songs", []):
+        fp = song.get("file_path", "")
+        if fp:
+            resolved = resolve_file_path(fp)
+            if os.path.isabs(resolved) and os.path.isfile(resolved):
+                song["file_path"] = to_relative_path(resolved)
+            elif os.path.isabs(fp):
+                song["file_path"] = to_relative_path(fp)
     with open(PLAYLIST_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -95,7 +103,7 @@ def get_playlist_api():
     data = load_playlist()
     # Check actual file existence on disk for each song
     for song in data.get("songs", []):
-        fp = song.get("file_path", "")
+        fp = resolve_file_path(song.get("file_path", ""))
         song["has_file"] = bool(fp and os.path.isfile(fp))
         if song["has_file"]:
             try:
@@ -256,7 +264,7 @@ def _worker_download_single(index: int, force: bool, quality: str):
         log_task(f"开始下载 {title} ({quality}p)...")
         success = download_mv(url, out_path, quality=quality)
         if success:
-            song["file_path"] = out_path
+            song["file_path"] = to_relative_path(out_path)
             save_playlist(data)
             log_task(f"✓ 下载成功: {title}")
         else:
@@ -302,7 +310,8 @@ def _worker_download_all(force: bool, quality: str):
             out_path = os.path.join(RAW_DIR, slug(title, artist) + ".mp4")
 
             # Check if file exists
-            if not force and song.get("file_path") and os.path.isfile(song["file_path"]):
+            existing_path = resolve_file_path(song.get("file_path", ""))
+            if not force and existing_path and os.path.isfile(existing_path):
                 log_task(f"跳过已存在: {title}")
                 continue
 
@@ -329,7 +338,7 @@ def _worker_download_all(force: bool, quality: str):
 
             log_task(f"下载 [{i+1}/{total}] {title}...")
             if download_mv(url, out_path, quality=quality):
-                song["file_path"] = out_path
+                song["file_path"] = to_relative_path(out_path)
                 save_playlist(data)
                 log_task(f"✓ 成功: {title}")
             else:

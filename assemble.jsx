@@ -32,9 +32,11 @@ var PANEL_H_PX   = 270;           // 面板高度（像素）
 var PANEL_Y_PCT  = (SEQ_H - PANEL_H_PX) / SEQ_H * 100;  // 面板顶部 Y（%）
 var PROGRESS_H   = 6;             // 进度条高度（像素）
 
-// 颜色
+// 颜色与字体（按系统自动选择中文字体）
 var COLOR_WHITE  = { red: 255, green: 255, blue: 255 };
 var COLOR_BLACK  = { red:   0, green:   0, blue:   0 };
+var IS_MAC       = $.os.toLowerCase().indexOf("mac") >= 0;
+var DEFAULT_FONT = IS_MAC ? "PingFang SC" : "Microsoft YaHei";
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,6 +72,32 @@ function readFile(path) {
     var content = f.read();
     f.close();
     return content;
+}
+
+/** 解析媒体路径：支持相对路径、当前系统绝对路径，以及跨平台历史绝对路径回退到 raw/ */
+function resolveMediaPath(filePath) {
+    if (!filePath) return "";
+    var normalized = String(filePath).replace(/\\/g, "/");
+    var isAbs = (normalized.charAt(0) === "/" || /^[A-Za-z]:\//.test(normalized));
+
+    // 1. 相对路径（如 "raw/xxx.mp4"）：基于脚本所在目录解析
+    if (!isAbs) {
+        var relFile = new File(SCRIPT_DIR + "/" + normalized);
+        if (relFile.exists) return relFile.fsName;
+    }
+
+    // 2. 当前系统绝对路径
+    var directFile = new File(filePath);
+    if (directFile.exists) return directFile.fsName;
+
+    // 3. 跨平台历史绝对路径回退：按文件名在同目录 raw/ 下查找
+    var parts = normalized.split("/");
+    var fileName = parts[parts.length - 1];
+    if (fileName) {
+        var rawFile = new File(SCRIPT_DIR + "/raw/" + fileName);
+        if (rawFile.exists) return rawFile.fsName;
+    }
+    return "";
 }
 
 /** 在项目 bin 中查找或创建文件夹 */
@@ -210,7 +238,7 @@ function addSongInfoTitle(sequence, song, startSecs, durationSecs, bin) {
 
     // ── 歌曲标题（大字）────────────────────────────────────
     var titleText = titleObj.addTextObject(song.title);
-    titleText.font          = "Microsoft YaHei";
+    titleText.font          = DEFAULT_FONT;
     titleText.fontSize      = 72;
     titleText.fillColor     = COLOR_WHITE;
     titleText.shadowEnabled = true;
@@ -225,7 +253,7 @@ function addSongInfoTitle(sequence, song, startSecs, durationSecs, bin) {
     // ── 艺人 · 专辑（小字）─────────────────────────────────
     var subLabel = song.artist + (song.album ? "  ·  " + song.album : "");
     var subText  = titleObj.addTextObject(subLabel);
-    subText.font      = "Microsoft YaHei";
+    subText.font      = DEFAULT_FONT;
     subText.fontSize  = 36;
     subText.fillColor = { red: 220, green: 220, blue: 220 };
     subText.position  = { x: 48, y: panelTop + 110 };
@@ -233,7 +261,7 @@ function addSongInfoTitle(sequence, song, startSecs, durationSecs, bin) {
     // ── 推荐语（更小字）────────────────────────────────────
     if (song.reason) {
         var reasonText = titleObj.addTextObject(song.reason);
-        reasonText.font      = "Microsoft YaHei";
+        reasonText.font      = DEFAULT_FONT;
         reasonText.fontSize  = 28;
         reasonText.fillColor = { red: 200, green: 200, blue: 200 };
         reasonText.position  = { x: 48, y: panelTop + 160 };
@@ -375,7 +403,8 @@ function main() {
     for (var i = 0; i < playlist.songs.length; i++) {
         var song = playlist.songs[i];
 
-        if (!song.file_path || !File(song.file_path).exists) {
+        var resolvedPath = resolveMediaPath(song.file_path);
+        if (!resolvedPath) {
             $.writeln("[SKIP] 素材文件不存在: " + song.title +
                       " → 请先运行 download.py");
             continue;
@@ -388,7 +417,7 @@ function main() {
         $.writeln("[处理] " + song.title + "  " + inSecs + "s → " + outSecs + "s  (" + clipDur.toFixed(1) + "s)");
 
         // 1. 导入并放置 MV 到 V1
-        var projectItem = importFile(song.file_path, mediaBin);
+        var projectItem = importFile(resolvedPath, mediaBin);
         var v1Clip = appendClip(sequence, 0, projectItem, inSecs, outSecs);
 
         // 2. 毛玻璃面板到 V2

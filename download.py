@@ -22,9 +22,45 @@ import sys
 import yt_dlp
 from netease import import_netease_playlist
 
-PLAYLIST = os.path.join(os.path.dirname(__file__), "playlist.json")
-RAW_DIR = os.path.join(os.path.dirname(__file__), "raw")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PLAYLIST = os.path.join(BASE_DIR, "playlist.json")
+RAW_DIR = os.path.join(BASE_DIR, "raw")
 os.makedirs(RAW_DIR, exist_ok=True)
+
+
+def to_relative_path(path: str, base_dir: str = BASE_DIR) -> str:
+    """Convert a path inside base_dir to a portable forward-slash relative path."""
+    if not path:
+        return ""
+    norm_path = os.path.abspath(path)
+    norm_base = os.path.abspath(base_dir)
+    try:
+        rel = os.path.relpath(norm_path, norm_base)
+        if not rel.startswith(".."):
+            return rel.replace("\\", "/")
+    except ValueError:
+        pass
+    return path.replace("\\", "/")
+
+
+def resolve_file_path(file_path: str, base_dir: str = BASE_DIR, raw_dir: str = RAW_DIR) -> str:
+    """Resolve relative, current-OS absolute, or cross-OS legacy file_path to an existing local path."""
+    if not file_path:
+        return ""
+    if os.path.isabs(file_path) and os.path.isfile(file_path):
+        return file_path
+    normalized = file_path.replace("\\", "/")
+    if not os.path.isabs(file_path) and not re.match(r"^[A-Za-z]:/", normalized):
+        candidate = os.path.normpath(os.path.join(base_dir, *normalized.split("/")))
+        if os.path.isfile(candidate):
+            return candidate
+        return candidate
+    basename = normalized.rsplit("/", 1)[-1]
+    if basename:
+        raw_candidate = os.path.join(raw_dir, basename)
+        if os.path.isfile(raw_candidate):
+            return raw_candidate
+    return file_path
 
 
 def slug(title: str, artist: str) -> str:
@@ -119,13 +155,14 @@ def main():
         out_path = os.path.join(RAW_DIR, slug(title, artist) + ".mp4")
 
         # 如果已有文件且未指定 --force，跳过；若指定 --force 则删除旧文件重新下载
-        if song.get("file_path") and os.path.isfile(song["file_path"]):
+        existing_path = resolve_file_path(song.get("file_path", ""))
+        if existing_path and os.path.isfile(existing_path):
             if not args.force:
                 print(f"[SKIP] 已存在: {title} (使用 --force 可重新以 1080p 高清覆盖)")
                 continue
             else:
                 try:
-                    os.remove(song["file_path"])
+                    os.remove(existing_path)
                 except Exception:
                     pass
 
@@ -144,7 +181,7 @@ def main():
         print(f"[下载高清 {args.quality}p] {title} → {out_path}")
         try:
             if download_mv(url, out_path, quality=args.quality):
-                song["file_path"] = out_path
+                song["file_path"] = to_relative_path(out_path)
                 changed = True
                 print(f"[OK] {out_path}")
         except Exception as e:
