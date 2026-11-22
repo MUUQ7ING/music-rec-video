@@ -14,10 +14,12 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 import yt_dlp
@@ -25,10 +27,16 @@ import yt_dlp
 from download import download_mv, slug, RAW_DIR, resolve_file_path, to_relative_path
 from netease import import_netease_playlist
 from bilibili import search_bilibili
+from preprocess import preprocess_song
+from renderers import list_renderers, render_song_clip
+from schema import load_playlist as load_playlist_model, save_playlist as save_playlist_model
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_PATH = Path(BASE_DIR)
 PLAYLIST_FILE = os.path.join(BASE_DIR, "playlist.json")
 WEB_DIR = os.path.join(BASE_DIR, "web")
+COVERS_DIR = os.path.join(BASE_DIR, "covers")
+os.makedirs(COVERS_DIR, exist_ok=True)
 
 app = FastAPI(title="Music Rec Video Studio")
 
@@ -39,6 +47,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.mount("/covers", StaticFiles(directory=COVERS_DIR), name="covers")
 
 # Global task state tracking
 task_lock = threading.Lock()
@@ -62,16 +71,8 @@ def log_task(msg: str):
 
 
 def load_playlist() -> dict:
-    """Load playlist.json from disk."""
-    if not os.path.isfile(PLAYLIST_FILE):
-        return {
-            "output_sequence_name": "音乐推荐合辑",
-            "resolution": {"width": 1920, "height": 1080},
-            "fps": 30,
-            "songs": [],
-        }
-    with open(PLAYLIST_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """Load playlist.json via unified schema, filling defaults for missing fields."""
+    return load_playlist_model(PLAYLIST_FILE).model_dump()
 
 
 def save_playlist(data: dict):
@@ -84,8 +85,7 @@ def save_playlist(data: dict):
                 song["file_path"] = to_relative_path(resolved)
             elif os.path.isabs(fp):
                 song["file_path"] = to_relative_path(fp)
-    with open(PLAYLIST_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    save_playlist_model(data, PLAYLIST_FILE)
 
 
 @app.get("/")
@@ -112,6 +112,13 @@ def get_playlist_api():
                 song["file_size_mb"] = 0
         else:
             song["file_size_mb"] = 0
+
+        cp = resolve_file_path(song.get("cover_path", ""))
+        song["has_cover"] = bool(cp and os.path.isfile(cp))
+        np = resolve_file_path(song.get("normalized_path", ""))
+        song["has_normalized"] = bool(np and os.path.isfile(np))
+        sp = resolve_file_path(song.get("pre_rendered_clip", ""))
+        song["has_pre_rendered"] = bool(sp and os.path.isfile(sp))
     return data
 
 
@@ -380,6 +387,128 @@ def get_status_api():
     """Get the current download task status and logs."""
     with task_lock:
         return dict(tasks_state)
+
+
+@app.get("/api/renderers")
+def get_renderers_api():
+    """List built-in annual template and all registered special clip renderers."""
+    items = [
+        {
+            "name": "annual",
+            "description": "年度歌单主模板（Pr 原生 .mogrt + 底部毛玻璃）",
+            "ready": True,
+            "message": "Pr 主模板",
+        }
+    ]
+    for name, renderer in list_renderers().items():
+        ready, msg = renderer.check_readiness(BASE_PATH)
+        items.append(
+            {
+                "name": name,
+                "description": renderer.description,
+                "ready": ready,
+                "message": msg,
+            }
+        )
+    return {"renderers": items}
+
+
+def _worker_preprocess(force: bool):
+    with task_lock:
+        tasks_state["is_downloading"] = True
+        tasks_state["progress_percent"] = 0
+    try:
+        playlist = load_playlist_model(PLAYLIST_FILE)
+        total = len(playlist.songs)
+        for i, song in enumerate(playlist.songs):
+            with task_lock:
+                tasks_state["current_song"] = f"预处理 [{i+1}/{total}] {song.title}"
+                tasks_state["progress_percent"] = int((i / max(1, total)) * 100)
+            preprocess_song(song, BASE_PATH, force=force, log_fn=log_task)
+            save_playlist_model(playlist, PLAYLIST_FILE)
+        with task_lock:
+            tasks_state["progress_percent"] = 100
+        log_task("🎉 全部素材预处理（1:1 封面 + -14 LUFS 响度统一）完成！")
+    except Exception as e:
+        log_task(f"预处理异常: {e}")
+    finally:
+        with task_lock:
+            tasks_state["is_downloading"] = False
+            tasks_state["current_song"] = ""
+
+
+class PreprocessRequest(BaseModel):
+    force: bool = False
+
+
+@app.post("/api/preprocess")
+def preprocess_api(req: PreprocessRequest):
+    """Trigger background cover extraction and -14 LUFS audio normalization."""
+    if tasks_state["is_downloading"]:
+        return JSONResponse(status_code=400, content={"message": "当前已有后台任务在进行中"})
+    t = threading.Thread(target=_worker_preprocess, args=(req.force,), daemon=True)
+    t.start()
+    return {"status": "started", "message": "已在后台启动预处理"}
+
+
+def _worker_render_special(index: Optional[int]):
+    with task_lock:
+        tasks_state["is_downloading"] = True
+        tasks_state["progress_percent"] = 0
+    try:
+        playlist = load_playlist_model(PLAYLIST_FILE)
+        targets = (
+            [(index, playlist.songs[index])]
+            if index is not None and 0 <= index < len(playlist.songs)
+            else [(i, s) for i, s in enumerate(playlist.songs) if s.template != "annual"]
+        )
+        total = len(targets)
+        if total == 0:
+            log_task("没有需要特殊模板渲染的单曲（全部为 annual 主模板）")
+            return
+
+        for step, (idx, song) in enumerate(targets):
+            with task_lock:
+                tasks_state["current_song"] = f"特殊渲染 [{step+1}/{total}] {song.title}"
+                tasks_state["progress_percent"] = int((step / total) * 100)
+            out_path = BASE_PATH / "processed" / f"special_{idx+1:02d}_{slug(song.title, song.artist)}.mp4"
+            res = render_song_clip(
+                song,
+                BASE_PATH,
+                out_path,
+                playlist.resolution,
+                playlist.fps,
+            )
+            if res.success and res.output_path:
+                song.pre_rendered_clip = res.output_path.relative_to(BASE_PATH).as_posix()
+                save_playlist_model(playlist, PLAYLIST_FILE)
+                log_task(f"✓ [{song.template}] {res.message}")
+            else:
+                log_task(f"✗ [{song.template}] {song.title}: {res.message}")
+
+        with task_lock:
+            tasks_state["progress_percent"] = 100
+        log_task("🎉 特殊单曲渲染流程结束！")
+    except Exception as e:
+        log_task(f"特殊渲染异常: {e}")
+    finally:
+        with task_lock:
+            tasks_state["is_downloading"] = False
+            tasks_state["current_song"] = ""
+
+
+class RenderSpecialRequest(BaseModel):
+    index: Optional[int] = None
+
+
+@app.post("/api/render_special")
+def render_special_api(req: RenderSpecialRequest):
+    """Trigger background rendering for special-template songs (e.g. wangye_ae)."""
+    if tasks_state["is_downloading"]:
+        return JSONResponse(status_code=400, content={"message": "当前已有后台任务在进行中"})
+    t = threading.Thread(target=_worker_render_special, args=(req.index,), daemon=True)
+    t.start()
+    return {"status": "started", "message": "已在后台启动特殊单曲渲染"}
 
 
 if __name__ == "__main__":

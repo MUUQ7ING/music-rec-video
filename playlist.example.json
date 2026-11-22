@@ -1,11 +1,18 @@
 {
-  "_comment": "音乐推荐视频歌单配置模板 — 可手动编辑，亦可通过 netease.py 或 Web 界面一键导入",
+  "_comment": "音乐推荐视频歌单配置模板 — 支持可选开场白与可插拔单曲模板",
   "output_sequence_name": "音乐推荐合辑",
   "resolution": {
     "width": 1920,
     "height": 1080
   },
   "fps": 30,
+  "intro": {
+    "enabled": false,
+    "text": "2025 年度私藏歌单\n一共收录 8 首歌，感谢这一年的声音陪伴。",
+    "duration": 8.0,
+    "bg_mode": "black",
+    "bg_image": ""
+  },
   "songs": [
     {
       "title": "夜曲",
@@ -15,7 +22,10 @@
       "start": "0:45",
       "end": "1:30",
       "file_path": "",
-      "reason": "《夜曲》推荐：古典钢琴与流行说唱的极致融合，前奏响起即是青春。"
+      "cover_path": "",
+      "reason": "古典钢琴与流行说唱的极致融合，前奏响起即是青春。",
+      "template": "annual",
+      "pre_rendered_clip": ""
     },
     {
       "title": "Blinding Lights",
@@ -25,7 +35,10 @@
       "start": "0:30",
       "end": "1:15",
       "file_path": "",
-      "reason": "《Blinding Lights》推荐：充满80年代复古霓虹气息的合成器浪潮，旋律抓耳动感。"
+      "cover_path": "",
+      "reason": "充满80年代复古霓虹气息的合成器浪潮，旋律抓耳动感。",
+      "template": "wangye_ae",
+      "pre_rendered_clip": ""
     }
   ]
 }

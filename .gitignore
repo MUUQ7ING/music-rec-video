@@ -1,5 +1,7 @@
 # Media files & downloads
 raw/
+covers/
+processed/
 temp/
 output/
 downloads/
