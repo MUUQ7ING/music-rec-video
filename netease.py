@@ -126,7 +126,9 @@ def convert_tracks_to_songs(
         title = t.get("name", "").strip()
         artists_list = [a.get("name", "").strip() for a in t.get("artists", [])]
         artist = " / ".join(filter(None, artists_list)) or "未知艺人"
-        album = t.get("album", {}).get("name", "").strip()
+        album_obj = t.get("album") or {}
+        album = album_obj.get("name", "").strip()
+        cover_url = album_obj.get("picUrl", "").strip()
 
         # If track duration is short, adjust start time
         dur_ms = t.get("duration", 0)
@@ -141,14 +143,95 @@ def convert_tracks_to_songs(
             "title": title,
             "artist": artist,
             "album": album,
+            "cover_url": cover_url,
             "youtube_url": "",
             "start": format_seconds(cur_start),
             "end": format_seconds(cur_end),
             "file_path": "",
+            "template": "annual",
             "reason": f"《{title}》推荐：旋律抓耳，编曲精湛。",
         })
 
     return songs
+
+
+NETEASE_PLACEHOLDER_PIC = "5639395138885805"
+
+
+def fetch_song_cover_url(song_id: int | str) -> str | None:
+    """Fetch official album cover URL for a NetEase song ID via song/detail."""
+    try:
+        resp = requests.get(
+            "https://music.163.com/api/song/detail/",
+            params={"id": str(song_id), "ids": f"[{song_id}]"},
+            headers=HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        songs = resp.json().get("songs") or []
+        if songs:
+            pic_url = ((songs[0].get("album") or {}).get("picUrl") or "").strip()
+            if pic_url and NETEASE_PLACEHOLDER_PIC not in pic_url:
+                return pic_url
+    except Exception:
+        pass
+    return None
+
+
+def search_netease_cover_url(
+    title: str,
+    artist: str = "",
+    album: str = "",
+) -> str | None:
+    """Search NetEase Cloud Music by title/artist/album and return official album picUrl."""
+    clean_artist = artist.split("/")[0].split(",")[0].strip()
+    queries = []
+    if title and clean_artist:
+        queries.append(f"{title} {clean_artist}")
+    if title:
+        queries.append(title)
+
+    for q in queries:
+        try:
+            resp = requests.post(
+                "https://music.163.com/api/search/get/web",
+                data={"s": q, "type": 1, "limit": 5, "offset": 0},
+                headers=HEADERS,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            songs = (resp.json().get("result") or {}).get("songs") or []
+            if not songs:
+                continue
+
+            # Prefer track matching album or artist name if available
+            best = songs[0]
+            album_lower = album.lower().strip()
+            artist_lower = clean_artist.lower()
+            for cand in songs:
+                c_album = ((cand.get("album") or {}).get("name") or "").lower()
+                c_artists = " ".join(
+                    a.get("name", "").lower() for a in (cand.get("artists") or [])
+                )
+                if album_lower and album_lower in c_album:
+                    best = cand
+                    break
+                if artist_lower and artist_lower in c_artists:
+                    best = cand
+                    break
+
+            pic_url = ((best.get("album") or {}).get("picUrl") or "").strip()
+            if pic_url and NETEASE_PLACEHOLDER_PIC not in pic_url:
+                return pic_url
+
+            song_id = best.get("id")
+            if song_id:
+                detail_url = fetch_song_cover_url(song_id)
+                if detail_url:
+                    return detail_url
+        except Exception:
+            continue
+    return None
 
 
 def import_netease_playlist(

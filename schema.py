@@ -46,6 +46,7 @@ class SongItem(BaseModel):
     end: str = "0:30"
     file_path: str = ""
     normalized_path: str = ""
+    cover_url: str = ""
     cover_path: str = ""
     reason: str = ""
     template: str = "annual"

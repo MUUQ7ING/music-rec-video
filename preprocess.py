@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 import os
 import shutil
 import subprocess
@@ -10,8 +11,10 @@ from pathlib import Path
 from typing import Callable
 
 from PIL import Image, ImageOps
+import requests
 
 from download import slug
+from netease import HEADERS as NETEASE_HEADERS, search_netease_cover_url
 from schema import SongItem
 
 
@@ -49,6 +52,43 @@ def parse_time_str(value: str | float | int) -> float:
     except ValueError:
         return 0.0
     return 0.0
+
+
+def fetch_netease_cover(
+    song: SongItem,
+    out_cover: Path,
+    size: int = 600,
+    force: bool = False,
+) -> Path | None:
+    """Fetch official album cover from NetEase Cloud Music and save as 1:1 PNG."""
+    if not force and out_cover.is_file():
+        return out_cover
+
+    cover_url = (song.cover_url or "").strip()
+    if not cover_url:
+        cover_url = search_netease_cover_url(song.title, song.artist, song.album) or ""
+        if cover_url:
+            song.cover_url = cover_url
+
+    if not cover_url:
+        return None
+
+    try:
+        # Request high-res square image from NetEase CDN
+        dl_url = f"{cover_url}?param={size}y{size}" if "?" not in cover_url else cover_url
+        resp = requests.get(dl_url, headers=NETEASE_HEADERS, timeout=15)
+        resp.raise_for_status()
+        out_cover.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(BytesIO(resp.content)) as img:
+            square = ImageOps.fit(
+                img.convert("RGB"),
+                (size, size),
+                method=Image.Resampling.LANCZOS,
+            )
+            square.save(out_cover, format="PNG")
+        return out_cover
+    except Exception:
+        return None
 
 
 def extract_square_cover(
@@ -162,10 +202,24 @@ def preprocess_song(
     Returns (cover_updated, audio_normalized).
     """
     log = log_fn or (lambda _msg: None)
+    base_slug = slug(song.title, song.artist)
+    cover_out = project_root / "covers" / f"{base_slug}.png"
+    norm_out = project_root / "processed" / f"{base_slug}_norm.mp4"
+
+    cover_ok = False
+    if force or not song.cover_path or not (project_root / song.cover_path).is_file():
+        res_cover = fetch_netease_cover(song, cover_out, force=force)
+        if res_cover:
+            song.cover_path = cover_out.relative_to(project_root).as_posix()
+            cover_ok = True
+            log(f"✓ 网易云官方封面已下载 (1:1): {song.cover_path}")
+        else:
+            log(f"✗ 未在网易云匹配到封面（可后续手动指定）: {song.title}")
+
     raw_rel = song.file_path.strip()
     if not raw_rel:
-        log(f"跳过预处理（无本地视频）: {song.title}")
-        return False, False
+        log(f"跳过响度统一（无本地视频）: {song.title}")
+        return cover_ok, False
 
     raw_path = (
         Path(raw_rel)
@@ -173,28 +227,8 @@ def preprocess_song(
         else (project_root / raw_rel)
     )
     if not raw_path.is_file():
-        log(f"跳过预处理（文件不存在）: {raw_path}")
-        return False, False
-
-    base_slug = slug(song.title, song.artist)
-    cover_out = project_root / "covers" / f"{base_slug}.png"
-    norm_out = project_root / "processed" / f"{base_slug}_norm.mp4"
-
-    start_sec = parse_time_str(song.start)
-    end_sec = parse_time_str(song.end)
-    sample_sec = start_sec + min(5.0, max(0.0, (end_sec - start_sec) * 0.25))
-
-    cover_ok = False
-    if force or not song.cover_path or not (project_root / song.cover_path).is_file():
-        res_cover = extract_square_cover(
-            raw_path, cover_out, timestamp_sec=sample_sec, force=force
-        )
-        if res_cover:
-            song.cover_path = cover_out.relative_to(project_root).as_posix()
-            cover_ok = True
-            log(f"✓ 封面已提取 (1:1): {song.cover_path}")
-        else:
-            log(f"✗ 封面提取失败: {song.title}")
+        log(f"跳过响度统一（文件不存在）: {raw_path}")
+        return cover_ok, False
 
     norm_ok = False
     res_norm = normalize_loudness(raw_path, norm_out, force=force)
