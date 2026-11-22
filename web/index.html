@@ -62,6 +62,12 @@
           导入网易云歌单
         </button>
 
+        <!-- Reorder Playlist Modal Trigger -->
+        <button @click="openReorderModal" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition flex items-center gap-1.5">
+          <span>⇅</span>
+          <span>歌单排序</span>
+        </button>
+
         <!-- Batch Download Button -->
         <button @click="downloadAll" :disabled="status.is_downloading" class="px-4 py-1.5 text-xs font-medium rounded-lg bg-brand-600 hover:bg-brand-500 disabled:opacity-50 text-white shadow-md shadow-brand-600/30 transition flex items-center gap-2">
           <svg v-if="status.is_downloading" class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
@@ -198,22 +204,6 @@
               <span v-else class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 border border-zinc-700">
                 待选视频方案
               </span>
-
-              <!-- Reorder Buttons -->
-              <div class="flex items-center space-x-1">
-                <button
-                  @click="moveSong(idx, -1)"
-                  :disabled="idx === 0"
-                  title="上移"
-                  class="px-2 py-1 text-xs rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 text-zinc-300 border border-zinc-700 transition"
-                >↑</button>
-                <button
-                  @click="moveSong(idx, 1)"
-                  :disabled="idx === playlist.songs.length - 1"
-                  title="下移"
-                  class="px-2 py-1 text-xs rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 text-zinc-300 border border-zinc-700 transition"
-                >↓</button>
-              </div>
 
               <!-- Single Download Button -->
               <button 
@@ -443,6 +433,52 @@
       </div>
     </main>
 
+    <!-- Reorder Playlist Modal -->
+    <div v-if="showReorderModal" class="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+      <div class="bg-zinc-900 border border-zinc-700 rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+        <div class="px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
+          <div>
+            <h3 class="font-bold text-white text-base">歌单顺序调整</h3>
+            <p class="text-xs text-zinc-400 mt-0.5">拖拽曲目行即可调整顺序，点击确认后同步更新主页面与配置</p>
+          </div>
+          <button @click="showReorderModal = false" class="text-zinc-400 hover:text-white text-lg">✕</button>
+        </div>
+
+        <div class="p-4 overflow-y-auto space-y-2 flex-1">
+          <div
+            v-for="(item, rIdx) in reorderDraft"
+            :key="item._origIdx"
+            draggable="true"
+            @dragstart="onDragStart(rIdx)"
+            @dragover.prevent="onDragOver(rIdx)"
+            @drop.prevent="onDrop(rIdx)"
+            @dragend="onDragEnd"
+            :class="[
+              'flex items-center gap-3 px-3 py-2.5 rounded-xl border cursor-grab active:cursor-grabbing select-none transition',
+              dragOverIdx === rIdx ? 'border-brand-500 bg-brand-950/40' : 'border-zinc-800 bg-zinc-950/80 hover:border-zinc-700',
+              dragSrcIdx === rIdx ? 'opacity-50' : ''
+            ]"
+          >
+            <span class="text-zinc-500 text-sm px-1">⋮⋮</span>
+            <span class="w-6 h-6 rounded-md bg-zinc-800 text-zinc-300 text-xs font-mono font-bold flex items-center justify-center shrink-0">
+              {{ rIdx + 1 }}
+            </span>
+            <img v-if="item.song.has_cover && item.song.cover_path" :src="'/' + item.song.cover_path" class="w-9 h-9 rounded-md object-cover shrink-0 border border-zinc-800" alt="" />
+            <div class="min-w-0 flex-1">
+              <div class="text-sm font-medium text-white truncate">{{ item.song.title }}</div>
+              <div class="text-xs text-zinc-400 truncate">{{ item.song.artist }}</div>
+            </div>
+            <span class="text-[11px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 shrink-0">{{ item.song.template || 'annual' }}</span>
+          </div>
+        </div>
+
+        <div class="px-6 py-4 bg-zinc-950 border-t border-zinc-800 flex justify-end gap-3">
+          <button @click="showReorderModal = false" class="px-4 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 transition">取消</button>
+          <button @click="applyReorder" class="px-4 py-2 text-xs font-medium rounded-lg bg-brand-600 hover:bg-brand-500 text-white transition">确认应用顺序</button>
+        </div>
+      </div>
+    </div>
+
     <!-- NetEase Import Modal -->
     <div v-if="showNeteaseModal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
       <div class="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl">
@@ -521,6 +557,12 @@
         const neteaseLimit = ref(8);
         const neteaseAppend = ref(false);
         const importingNetease = ref(false);
+
+        // Reorder Modal State
+        const showReorderModal = ref(false);
+        const reorderDraft = ref([]);
+        const dragSrcIdx = ref(null);
+        const dragOverIdx = ref(null);
 
         const getDefaultQuery = (song) => {
           const cleanTitle = (song.title || '').split('(')[0].split('（')[0].trim().slice(0, 30);
@@ -610,20 +652,57 @@
           }
         };
 
-        const moveSong = async (idx, delta) => {
-          const target = idx + delta;
-          const songs = playlist.value.songs;
-          if (target < 0 || target >= songs.length) return;
-          const tmp = songs[idx];
-          songs[idx] = songs[target];
-          songs[target] = tmp;
+        const openReorderModal = () => {
+          reorderDraft.value = (playlist.value.songs || []).map((song, idx) => ({
+            song,
+            _origIdx: idx,
+          }));
+          dragSrcIdx.value = null;
+          dragOverIdx.value = null;
+          showReorderModal.value = true;
+        };
 
-          for (const mapRef of [candidatesMap, platformMap, customQueries, loadingCandidates]) {
-            const vA = mapRef.value[idx];
-            const vB = mapRef.value[target];
-            if (vB !== undefined) mapRef.value[idx] = vB; else delete mapRef.value[idx];
-            if (vA !== undefined) mapRef.value[target] = vA; else delete mapRef.value[target];
-          }
+        const onDragStart = (idx) => {
+          dragSrcIdx.value = idx;
+        };
+
+        const onDragOver = (idx) => {
+          dragOverIdx.value = idx;
+        };
+
+        const onDrop = (targetIdx) => {
+          const srcIdx = dragSrcIdx.value;
+          if (srcIdx === null || srcIdx === targetIdx) return;
+          const list = reorderDraft.value;
+          const [moved] = list.splice(srcIdx, 1);
+          list.splice(targetIdx, 0, moved);
+          dragSrcIdx.value = null;
+          dragOverIdx.value = null;
+        };
+
+        const onDragEnd = () => {
+          dragSrcIdx.value = null;
+          dragOverIdx.value = null;
+        };
+
+        const applyReorder = async () => {
+          const newSongs = reorderDraft.value.map((item) => item.song);
+          const remap = (mapRef) => {
+            const next = {};
+            reorderDraft.value.forEach((item, newIdx) => {
+              if (mapRef.value[item._origIdx] !== undefined) {
+                next[newIdx] = mapRef.value[item._origIdx];
+              }
+            });
+            mapRef.value = next;
+          };
+          remap(candidatesMap);
+          remap(platformMap);
+          remap(customQueries);
+          remap(loadingCandidates);
+
+          playlist.value.songs = newSongs;
+          showReorderModal.value = false;
           await savePlaylist();
         };
 
@@ -770,6 +849,16 @@
           neteaseLimit,
           neteaseAppend,
           importingNetease,
+          showReorderModal,
+          reorderDraft,
+          dragSrcIdx,
+          dragOverIdx,
+          openReorderModal,
+          onDragStart,
+          onDragOver,
+          onDrop,
+          onDragEnd,
+          applyReorder,
           getDefaultQuery,
           setPlatform,
           searchCandidates,
@@ -779,7 +868,6 @@
           downloadAll,
           preprocessAll,
           renderSpecialAll,
-          moveSong,
           savePlaylist,
           submitNetease,
         };
