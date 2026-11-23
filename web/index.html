@@ -124,7 +124,7 @@
           </div>
           <div>
             <div class="font-medium text-white text-sm">Premiere Pro 快速使用指引</div>
-            <div class="text-zinc-400 mt-0.5">选好素材并下载后，在 Pr 中点击：<span class="text-zinc-200 font-mono bg-zinc-800 px-1 py-0.5 rounded">文件 → 脚本 → 运行脚本</span>，选择 <span class="text-brand-300 font-mono">assemble.jsx</span> 即可一键自动生成！</div>
+            <div class="text-zinc-400 mt-0.5">选好素材并完成「下载 + 预处理（1:1 封面 / -14 LUFS）」后，在 Pr 中通过 <span class="text-zinc-200 font-mono bg-zinc-800 px-1 py-0.5 rounded">ExtendScript Debugger</span> 或 <span class="text-zinc-200 font-mono bg-zinc-800 px-1 py-0.5 rounded">文件 → 脚本 → 运行脚本</span> 运行 <span class="text-brand-300 font-mono">scripts/assemble_v2.jsx</span>，配合 <span class="text-brand-300 font-mono">templates/annual.mogrt</span> 自动生成！</div>
           </div>
         </div>
         <button @click="showLogs = !showLogs" class="text-xs text-zinc-400 hover:text-zinc-200 underline">
@@ -296,7 +296,7 @@
 
               <!-- Recommendation Reason -->
               <div>
-                <label class="block text-xs font-medium text-zinc-400 mb-1.5">视频毛玻璃底板上的推荐语</label>
+                <label class="block text-xs font-medium text-zinc-400 mb-1.5">画面推荐语（MOGRT 展示文案）</label>
                 <textarea 
                   v-model="song.reason" 
                   @change="savePlaylist"

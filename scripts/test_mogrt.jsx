@@ -1,10 +1,12 @@
 /**
- * scripts/test_mogrt.jsx — Premiere Pro 2025 路线 A (.mogrt) 最小 API 实测脚本
+ * scripts/test_mogrt.jsx — Premiere Pro 2025 路线 A (.mogrt) 全面 API 实测脚本
  *
  * 兼容：VS Code ExtendScript Debugger / CEP MCP Bridge / Pr 脚本运行
- * 特点：
- * - 全程 try/catch 兜底，任何异常都会写入 scripts/mogrt_probe_report.txt 并返回字符串
- * - 自动搜索项目 templates/annual.mogrt 或 Windows 本机内置 .mogrt，找不到再弹窗
+ * 特性：
+ * 1. 自动兼容 AE 导出 .mogrt（getMGTComponent()）与 Pr 原生 .mogrt（importedClip.components 回退）
+ * 2. 自带 ES3 兼容 JSON 序列化工具，实测中文 + 换行符写入（textEditValue）
+ * 3. 自动探测媒体替换 API（setMediaFilePath / getMediaFilePath）
+ * 4. 全程 try/catch 兜底，详细报告写入 scripts/mogrt_probe_report.txt
  */
 
 (function () {
@@ -12,6 +14,38 @@
     function log(msg) {
         logLines.push(String(msg));
         try { $.writeln(String(msg)); } catch (e) {}
+    }
+
+    // Minimal ES3-safe JSON serializer for ExtendScript
+    function escapeJsonStr(s) {
+        return String(s)
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, '\\"')
+            .replace(/\r/g, "\\r")
+            .replace(/\n/g, "\\n")
+            .replace(/\t/g, "\\t");
+    }
+
+    function toJson(val) {
+        if (val === null) return "null";
+        var t = typeof val;
+        if (t === "boolean" || t === "number") return String(val);
+        if (t === "string") return '"' + escapeJsonStr(val) + '"';
+        if (val instanceof Array) {
+            var arr = [];
+            for (var i = 0; i < val.length; i++) arr.push(toJson(val[i]));
+            return "[" + arr.join(",") + "]";
+        }
+        if (t === "object") {
+            var pairs = [];
+            for (var k in val) {
+                if (val.hasOwnProperty(k) && typeof val[k] !== "function" && typeof val[k] !== "undefined") {
+                    pairs.push('"' + escapeJsonStr(k) + '":' + toJson(val[k]));
+                }
+            }
+            return "{" + pairs.join(",") + "}";
+        }
+        return "null";
     }
 
     var projectRoot = "D:/prworks/music-rec-video";
@@ -65,6 +99,52 @@
         return null;
     }
 
+    function probeProperties(props, prefix, summary, state) {
+        for (var i = 0; i < props.numItems; i++) {
+            var p = props[i];
+            var valStr = "";
+            try { valStr = String(p.getValue()); } catch (eVal) { valStr = "<err: " + eVal + ">"; }
+            var hasSetMedia = (typeof p.setMediaFilePath === "function");
+            var hasGetMedia = (typeof p.getMediaFilePath === "function");
+
+            if (hasSetMedia || hasGetMedia) {
+                state.mediaPropCount++;
+            }
+
+            log(
+                prefix + "[" + i + "] displayName=" + p.displayName
+                + " | matchName=" + p.matchName
+                + " | value=" + valStr.substring(0, 100).replace(/\r|\n/g, " ")
+                + " | setMedia=" + hasSetMedia
+                + " | getMedia=" + hasGetMedia
+            );
+
+            if (summary.length < 12) {
+                summary.push(prefix + "[" + i + "] " + p.displayName + " (setMedia=" + hasSetMedia + ")");
+            }
+
+            // Test writing Chinese + newline into the first textEditValue JSON property
+            if (!state.textTested && valStr.indexOf("textEditValue") >= 0) {
+                try {
+                    var parsed = eval("(" + valStr + ")");
+                    parsed.textEditValue = "#01 年度推荐\r中文与换行写入成功";
+                    var serialized = (typeof JSON !== "undefined" && JSON.stringify)
+                        ? JSON.stringify(parsed)
+                        : toJson(parsed);
+                    p.setValue(serialized, true);
+                    var verifyVal = "";
+                    try { verifyVal = String(p.getValue()); } catch (eV) {}
+                    var verified = (verifyVal.indexOf("中文与换行写入成功") >= 0);
+                    log("  -> Tested JSON textEditValue setValue(): " + (verified ? "VERIFIED OK" : "CALLED (verify=" + verifyVal.substring(0, 80) + ")"));
+                    state.textTested = true;
+                    state.textVerified = verified;
+                } catch (eTxt) {
+                    log("  -> Text setValue test error: " + eTxt);
+                }
+            }
+        }
+    }
+
     try {
         log("=== Premiere Pro .mogrt API Probe Report ===");
         log("Pr Version: " + app.version);
@@ -114,56 +194,47 @@
         log("Imported Clip: " + importedClip.name);
         log("Duration (sec): " + (importedClip.end.seconds - importedClip.start.seconds));
 
-        var mgtComp = importedClip.getMGTComponent();
-        if (!mgtComp) {
-            log("WARN: getMGTComponent() returned null");
-            writeReport(logLines);
-            alert("导入成功，但 getMGTComponent() 为空。");
-            return logLines.join("\n");
-        }
-
-        var props = mgtComp.properties;
-        log("Total MGT Properties: " + props.numItems);
-        log("");
-
         var summary = [];
-        var textTested = false;
-        for (var i = 0; i < props.numItems; i++) {
-            var p = props[i];
-            var valStr = "";
-            try { valStr = String(p.getValue()); } catch (eVal) { valStr = "<err: " + eVal + ">"; }
-            var hasSetMedia = (typeof p.setMediaFilePath === "function");
-            var hasGetMedia = (typeof p.getMediaFilePath === "function");
+        var state = { textTested: false, textVerified: false, mediaPropCount: 0 };
+        var mode = "";
 
-            log(
-                "[" + i + "] displayName=" + p.displayName
-                + " | matchName=" + p.matchName
-                + " | value=" + valStr.substring(0, 80).replace(/\r|\n/g, " ")
-                + " | setMediaFilePath=" + hasSetMedia
-                + " | getMediaFilePath=" + hasGetMedia
-            );
-
-            if (i < 10) {
-                summary.push("[" + i + "] " + p.displayName + " (setMedia=" + hasSetMedia + ")");
-            }
-
-            if (!textTested && valStr.indexOf("textEditValue") >= 0) {
-                try {
-                    var parsed = eval("(" + valStr + ")");
-                    parsed.textEditValue = "Pr2025 API 实测成功";
-                    if (typeof JSON !== "undefined" && JSON.stringify) {
-                        p.setValue(JSON.stringify(parsed), true);
-                        log("  -> Tested JSON textEditValue setValue(): OK");
-                        textTested = true;
+        var mgtComp = importedClip.getMGTComponent();
+        if (mgtComp) {
+            mode = "AE-MOGRT (getMGTComponent)";
+            log("Mode: " + mode);
+            log("Total MGT Properties: " + mgtComp.properties.numItems);
+            log("");
+            probeProperties(mgtComp.properties, "", summary, state);
+        } else {
+            mode = "Pr-Native-MOGRT (components fallback)";
+            log("WARN: getMGTComponent() returned null -> falling back to importedClip.components");
+            var comps = importedClip.components;
+            log("Total Components on Clip: " + (comps ? comps.numItems : 0));
+            log("");
+            if (comps) {
+                for (var c = 0; c < comps.numItems; c++) {
+                    var comp = comps[c];
+                    var cName = comp.displayName || "";
+                    var cMatch = comp.matchName || "";
+                    log("--- Component [" + c + "] displayName=" + cName + " | matchName=" + cMatch + " | props=" + comp.properties.numItems + " ---");
+                    // Skip standard intrinsic components (Motion / Opacity / Time Remapping)
+                    if (cMatch === "AE.ADBE Motion" || cMatch === "AE.ADBE Opacity" || cMatch === "AE.ADBE Time Remapping") {
+                        continue;
                     }
-                } catch (eTxt) {
-                    log("  -> Text setValue test error: " + eTxt);
+                    probeProperties(comp.properties, "C" + c + ".", summary, state);
                 }
             }
         }
 
         var reportPath = writeReport(logLines);
-        alert("MOGRT 实测完成！共 " + props.numItems + " 个属性。\n报告: " + reportPath + "\n\n" + summary.join("\n"));
+        alert(
+            "MOGRT 实测完成！\n"
+            + "模式: " + mode + "\n"
+            + "中文+换行写入: " + (state.textVerified ? "成功" : (state.textTested ? "已调用(见报告)" : "未发现文本属性")) + "\n"
+            + "媒体替换属性数: " + state.mediaPropCount + "\n"
+            + "报告: " + reportPath + "\n\n"
+            + summary.join("\n")
+        );
         return logLines.join("\n");
     } catch (fatal) {
         log("FATAL ERROR: " + fatal + " (line " + (fatal.line || "?") + ")");

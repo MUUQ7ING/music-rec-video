@@ -1,11 +1,17 @@
 {
-  "_comment": "音乐推荐视频歌单配置 — 由 download.py 下载素材后自动补全 file_path",
   "output_sequence_name": "Our Love Is Alive",
   "resolution": {
     "width": 1920,
     "height": 1080
   },
   "fps": 30,
+  "intro": {
+    "enabled": false,
+    "text": "",
+    "duration": 8.0,
+    "bg_mode": "black",
+    "bg_image": ""
+  },
   "songs": [
     {
       "title": "it brings back memories. though there was nothing in those days, \"nothingness\" was still there.",
@@ -15,9 +21,18 @@
       "start": "0:28",
       "end": "0:48",
       "file_path": "raw/samebeam_it_brings_back_memories__though_there_was_nothing_in_those_days___nothingness__was_still_there_.mp4",
+      "normalized_path": "processed/samebeam_it_brings_back_memories__though_there_was_nothing_in_those_days___nothingness__was_still_there__norm.mp4",
+      "spectrum_path": "processed/samebeam_it_brings_back_memories__though_there_was_nothing_in_those_days___nothingness__was_still_there__spectrum.mov",
+      "cover_url": "https://p2.music.126.net/5B6jz8z44lewIaANs7xPGA==/109951169541157657.jpg",
+      "cover_path": "covers/samebeam_it_brings_back_memories__though_there_was_nothing_in_those_days___nothingness__was_still_there_.png",
       "reason": "冰",
+      "template": "annual",
+      "pre_rendered_clip": "",
       "has_file": true,
-      "file_size_mb": 14.16
+      "file_size_mb": 14.16,
+      "has_cover": true,
+      "has_normalized": true,
+      "has_pre_rendered": false
     },
     {
       "title": "ピュア (feat. 橋本絵莉子)",
@@ -27,9 +42,18 @@
       "start": "0:57",
       "end": "1:27",
       "file_path": "raw/PAS_TASTA___橋本絵莉子_ピュア__feat__橋本絵莉子_.mp4",
+      "normalized_path": "processed/PAS_TASTA___橋本絵莉子_ピュア__feat__橋本絵莉子__norm.mp4",
+      "spectrum_path": "processed/PAS_TASTA___橋本絵莉子_ピュア__feat__橋本絵莉子__spectrum.mov",
+      "cover_url": "https://p1.music.126.net/AMaU2gMGqpBCCW3lUxw1EA==/109951172587021573.jpg",
+      "cover_path": "covers/PAS_TASTA___橋本絵莉子_ピュア__feat__橋本絵莉子_.png",
       "reason": "欢乐",
+      "template": "annual",
+      "pre_rendered_clip": "",
       "has_file": true,
-      "file_size_mb": 41.48
+      "file_size_mb": 41.48,
+      "has_cover": true,
+      "has_normalized": true,
+      "has_pre_rendered": false
     },
     {
       "title": "Our Love Is Alive",
@@ -39,9 +63,18 @@
       "start": "0:45",
       "end": "1:15",
       "file_path": "raw/The_Avalanches___Suzanne_Ciani___Barry_Can_t_Swim_Our_Love_Is_Alive.mp4",
+      "normalized_path": "processed/The_Avalanches___Suzanne_Ciani___Barry_Can_t_Swim_Our_Love_Is_Alive_norm.mp4",
+      "spectrum_path": "processed/The_Avalanches___Suzanne_Ciani___Barry_Can_t_Swim_Our_Love_Is_Alive_spectrum.mov",
+      "cover_url": "https://p2.music.126.net/G7zJ9XYF5MnXxO8kO8kSqg==/109951174116674614.jpg",
+      "cover_path": "covers/The_Avalanches___Suzanne_Ciani___Barry_Can_t_Swim_Our_Love_Is_Alive.png",
       "reason": "美好",
+      "template": "annual",
+      "pre_rendered_clip": "",
       "has_file": true,
-      "file_size_mb": 48.94
+      "file_size_mb": 48.94,
+      "has_cover": true,
+      "has_normalized": true,
+      "has_pre_rendered": false
     },
     {
       "title": "B Who I Want 2 B",
@@ -51,9 +84,18 @@
       "start": "1:38",
       "end": "2:08",
       "file_path": "raw/安室奈美恵___初音ミク_B_Who_I_Want_2_B.mp4",
+      "normalized_path": "processed/安室奈美恵___初音ミク_B_Who_I_Want_2_B_norm.mp4",
+      "spectrum_path": "processed/安室奈美恵___初音ミク_B_Who_I_Want_2_B_spectrum.mov",
+      "cover_url": "https://p1.music.126.net/E3mhmJ-FibsSwWnUMUzVMw==/18530069464842432.jpg",
+      "cover_path": "covers/安室奈美恵___初音ミク_B_Who_I_Want_2_B.png",
       "reason": "好奇妙的阵容",
+      "template": "annual",
+      "pre_rendered_clip": "",
       "has_file": true,
-      "file_size_mb": 86.06
+      "file_size_mb": 86.06,
+      "has_cover": true,
+      "has_normalized": true,
+      "has_pre_rendered": false
     },
     {
       "title": "joy",
@@ -63,9 +105,18 @@
       "start": "6:35",
       "end": "6:50",
       "file_path": "raw/レイ_ハラカミ_joy.mp4",
+      "normalized_path": "processed/レイ_ハラカミ_joy_norm.mp4",
+      "spectrum_path": "processed/レイ_ハラカミ_joy_spectrum.mov",
+      "cover_url": "https://p2.music.126.net/R8pWofc4duhifXpLnuNtHA==/109951164995366157.jpg",
+      "cover_path": "covers/レイ_ハラカミ_joy.png",
       "reason": "认识的契机是鱼韵， 但是发现颇也听十分惊喜",
+      "template": "annual",
+      "pre_rendered_clip": "",
       "has_file": true,
-      "file_size_mb": 17.78
+      "file_size_mb": 17.78,
+      "has_cover": true,
+      "has_normalized": true,
+      "has_pre_rendered": false
     },
     {
       "title": "Summer Fling",
@@ -75,9 +126,18 @@
       "start": "1:07",
       "end": "1:25",
       "file_path": "raw/leroy___Jane_Remover_Summer_Fling.mp4",
+      "normalized_path": "processed/leroy___Jane_Remover_Summer_Fling_norm.mp4",
+      "spectrum_path": "processed/leroy___Jane_Remover_Summer_Fling_spectrum.mov",
+      "cover_url": "https://p1.music.126.net/NuaAB-7bBcdMYYTB2bU-wQ==/109951173285913644.jpg",
+      "cover_path": "covers/leroy___Jane_Remover_Summer_Fling.png",
       "reason": "美好的收尾",
+      "template": "annual",
+      "pre_rendered_clip": "",
       "has_file": true,
-      "file_size_mb": 9.29
+      "file_size_mb": 8.4,
+      "has_cover": true,
+      "has_normalized": true,
+      "has_pre_rendered": false
     },
     {
       "title": "わをん",
@@ -87,9 +147,18 @@
       "start": "0:58",
       "end": "1:18",
       "file_path": "raw/にしな_わをん.mp4",
+      "normalized_path": "processed/にしな_わをん_norm.mp4",
+      "spectrum_path": "processed/にしな_わをん_spectrum.mov",
+      "cover_url": "https://p2.music.126.net/_THtXjUv7egt2vICNNPMLw==/109951170236864377.jpg",
+      "cover_path": "covers/にしな_わをん.png",
       "reason": "华丽",
+      "template": "annual",
+      "pre_rendered_clip": "",
       "has_file": true,
-      "file_size_mb": 54.22
+      "file_size_mb": 54.22,
+      "has_cover": true,
+      "has_normalized": true,
+      "has_pre_rendered": false
     },
     {
       "title": "グッドバイ",
@@ -99,9 +168,19 @@
       "start": "4:00",
       "end": "4:40",
       "file_path": "raw/サカナクション_グッドバイ.mp4",
+      "normalized_path": "processed/サカナクション_グッドバイ_norm.mp4",
+      "spectrum_path": "processed/サカナクション_グッドバイ_spectrum.mov",
+      "cover_url": "https://p1.music.126.net/xNrLB8-zcZqgY4gYf-8TbA==/109951164158289281.jpg",
+      "cover_path": "covers/サカナクション_グッドバイ.png",
       "reason": "再见",
+      "template": "annual",
+      "pre_rendered_clip": "",
       "has_file": true,
-      "file_size_mb": 51.18
+      "file_size_mb": 51.18,
+      "has_cover": true,
+      "has_normalized": true,
+      "has_pre_rendered": false
     }
-  ]
+  ],
+  "_comment": "音乐推荐视频歌单配置 — 由 download.py 下载素材后自动补全 file_path"
 }

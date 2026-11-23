@@ -6,6 +6,7 @@ temp/
 output/
 downloads/
 *.mp4
+*.mov
 *.m4a
 *.mp3
 *.wav
@@ -13,6 +14,11 @@ downloads/
 *.jpeg
 *.png
 *.lrc
+
+# Temporary script logs & scratch AE files
+scripts/*_report.txt
+scripts/.ae_headless
+scripts/test*.aep
 
 # Python cache & virtual environments
 __pycache__/
