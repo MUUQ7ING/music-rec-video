@@ -8,10 +8,13 @@
  *           Insert directly to V1/A1 and skip V2/V3/V4 packaging (pluggable AE renderer support).
  *       * Otherwise (standard 'annual' template):
  *           V1 / A1 : Normalized (-14 LUFS) or raw MV clip trimmed to [start, end]
- *           V2      : Floating glass frosted blur (same MV clip with Gaussian Blur 28 + 4-side sharp Crop to [42..1878, 898..1054])
- *           V3      : AE-exported templates/annual.mogrt (light translucent glass tint, real-time progress bar via DURATION_SEC, white serif text + dark shadow)
- *           V4      : Official 1:1 album cover (covers/*.png) flush-left with floating glass bar (156x156)
- *           V5      : Transparent audio spectrum visualizer (processed/*_spectrum.mov) directly above progress bar
+ *           V2      : Floating glass frosted blur (same MV clip with Gaussian Blur 32 + 4-side sharp Crop to [28..1892, 870..1056])
+ *           V3      : AE-exported 30fps static-friendly templates/annual.mogrt (native editable text + marquee + dynamic shadow boost)
+ *           V4      : Official 1:1 album cover (covers/*.png) flush-left with floating glass bar (186x186)
+ *           V5      : Transparent 60fps frosted-glass audio spectrum visualizer (processed/*_spectrum.mov) inside cover bottom
+ *           V6      : Native GPU 60fps progress bar (templates/progress_bar.png with Crop Right 100% -> 0% keyframes)
+ *           V7      : Bilingual lyrics (templates/lyric_line.mogrt, auto-shifted down +34px when song title is long)
+ *           Transitions: Configurable video/audio transitions (Cross Dissolve / Dip to Black + Constant Power + optional AE overlay)
  *
  * Usage:
  *   Premiere Pro 2025 -> VS Code ExtendScript Debugger / CEP Bridge / File -> Scripts -> Run Script...
@@ -147,30 +150,286 @@
         return lines.join("\r");
     }
 
-    function formatReasonText(text, maxCharsPerLine) {
+    /**
+     * Preserve user's exact manual line breaks for top-right recommendation text (no auto-wrapping).
+     */
+    function formatReasonText(text) {
         if (!text) return "";
-        // Normalize newlines to \r (AE/Pr textEditValue convention)
-        var rawLines = String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-        var outLines = [];
-        for (var i = 0; i < rawLines.length; i++) {
-            var line = rawLines[i];
-            // Avoid orphan 1-3 chars dangling on the next line
-            if (line.length <= maxCharsPerLine + 3) {
-                outLines.push(line);
-            } else {
-                var pos = 0;
-                while (pos < line.length) {
-                    var rem = line.length - pos;
-                    if (rem <= maxCharsPerLine + 3) {
-                        outLines.push(line.substring(pos));
-                        break;
+        return String(text).replace(/\r\n/g, "\r").replace(/\n/g, "\r");
+    }
+
+    function readJsonFile(fsPath) {
+        if (!fsPath) return null;
+        try {
+            var f = new File(fsPath);
+            if (!f.exists) return null;
+            f.encoding = "UTF-8";
+            f.open("r");
+            var txt = f.read();
+            f.close();
+            return eval("(" + txt + ")");
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function resolveShadowFlag(song, zoneKey) {
+        var mode = song.shadow_boost || "auto";
+        if (mode === "strong") return 1;
+        if (mode === "normal") return 0;
+        var det = song.detected_bright || {};
+        return det[zoneKey] ? 1 : 0;
+    }
+
+    /** Apply low-frequency beat-reactive scale pulse & subtle shake keyframes onto V1/V2 Motion */
+    function applyBeatMotionKeyframes(clip, beatData, fitScalePct) {
+        if (!beatData || !beatData.keyframes || beatData.keyframes.length === 0) return false;
+        var kfs = beatData.keyframes;
+        var scaleProp = null;
+        var posProp = null;
+        try {
+            for (var c = 0; c < clip.components.numItems; c++) {
+                var comp = clip.components[c];
+                if (comp.matchName === "AE.ADBE Motion" || comp.displayName === "运动" || comp.displayName === "Motion") {
+                    for (var p = 0; p < comp.properties.numItems; p++) {
+                        var prop = comp.properties[p];
+                        if (prop.displayName === "缩放" || prop.displayName === "Scale") scaleProp = prop;
+                        else if (prop.displayName === "位置" || prop.displayName === "Position") posProp = prop;
                     }
-                    outLines.push(line.substring(pos, pos + maxCharsPerLine));
-                    pos += maxCharsPerLine;
+                    break;
+                }
+            }
+            if (!scaleProp || !posProp) return false;
+
+            scaleProp.setTimeVarying(true);
+            posProp.setTimeVarying(true);
+            var baseInSec = clip.inPoint.seconds;
+            var factor = (fitScalePct || 100.0) / 100.0;
+
+            for (var i = 0; i < kfs.length; i++) {
+                var kf = kfs[i];
+                var t = secsToTime(baseInSec + kf.t);
+                var sVal = kf.scale * factor;
+                var px = 0.5 + (kf.dx / SEQ_W);
+                var py = 0.5 + (kf.dy / SEQ_H);
+                scaleProp.addKey(t);
+                scaleProp.setValueAtKey(t, sVal, true);
+                posProp.addKey(t);
+                posProp.setValueAtKey(t, [px, py], true);
+            }
+            return true;
+        } catch (eBeat) {
+            return false;
+        }
+    }
+
+    function findQeVideoTransition(names) {
+        for (var i = 0; i < names.length; i++) {
+            try {
+                var tr = qe.project.getVideoTransitionByName(names[i]);
+                if (tr && tr.name && String(tr.name).length > 0) return tr;
+            } catch (e) {}
+        }
+        return null;
+    }
+
+    function findQeAudioTransition(names) {
+        for (var i = 0; i < names.length; i++) {
+            try {
+                var tr = qe.project.getAudioTransitionByName(names[i]);
+                if (tr && tr.name && String(tr.name).length > 0) return tr;
+            } catch (e) {}
+        }
+        return null;
+    }
+
+    /** Apply configurable video/audio transitions between adjacent song clips */
+    function applyTrackTransitions(qeSeq, transCfg, fps) {
+        var style = (transCfg && transCfg.video_style) ? String(transCfg.video_style) : "cross_dissolve";
+        var vDurSec = (transCfg && typeof transCfg.video_duration === "number") ? transCfg.video_duration : 0.6;
+        var aDurSec = (transCfg && typeof transCfg.audio_duration === "number") ? transCfg.audio_duration : 0.8;
+        var vFrames = Math.max(4, Math.round(vDurSec * fps));
+        var aFrames = Math.max(4, Math.round(aDurSec * fps));
+        var applied = 0;
+
+        if (style !== "none") {
+            var vNames = (style === "dip_to_black")
+                ? ["黑场过渡", "Dip to Black", "交叉溶解", "Cross Dissolve"]
+                : ["交叉溶解", "Cross Dissolve"];
+            var vTrans = findQeVideoTransition(vNames);
+            if (vTrans) {
+                // Apply to V1 (0) and V2 (1) cut points between consecutive songs
+                var tracksToCross = [0, 1];
+                for (var tIdx = 0; tIdx < tracksToCross.length; tIdx++) {
+                    try {
+                        var qeVTrack = qeSeq.getVideoTrackAt(tracksToCross[tIdx]);
+                        var seenClips = 0;
+                        for (var i = 0; i < qeVTrack.numItems; i++) {
+                            var it = qeVTrack.getItemAt(i);
+                            if (it && it.type === "Clip") {
+                                if (seenClips > 0) {
+                                    try {
+                                        it.addTransition(vTrans, true, "00:00:00:" + pad2(Math.min(59, vFrames)));
+                                        if (tracksToCross[tIdx] === 0) applied++;
+                                    } catch (eVT) {}
+                                }
+                                seenClips++;
+                            }
+                        }
+                    } catch (eTrkV) {}
                 }
             }
         }
-        return outLines.join("\r");
+
+        // Audio Constant Power crossfade on A1 (0)
+        if (aDurSec > 0.05) {
+            var aTrans = findQeAudioTransition(["恒定功率", "Constant Power"]);
+            if (aTrans) {
+                try {
+                    var qeATrack = qeSeq.getAudioTrackAt(0);
+                    var seenAudio = 0;
+                    for (var j = 0; j < qeATrack.numItems; j++) {
+                        var ait = qeATrack.getItemAt(j);
+                        if (ait && ait.type === "Clip") {
+                            if (seenAudio > 0) {
+                                try {
+                                    ait.addTransition(aTrans, true, "00:00:00:" + pad2(Math.min(59, aFrames)));
+                                } catch (eAT) {}
+                            }
+                            seenAudio++;
+                        }
+                    }
+                } catch (eTrkA) {}
+            }
+        }
+        return applied;
+    }
+
+    function shiftClipVerticalPx(clip, dyPx) {
+        if (!dyPx) return;
+        try {
+            for (var c = 0; c < clip.components.numItems; c++) {
+                var comp = clip.components[c];
+                if (comp.matchName === "AE.ADBE Motion" || comp.displayName === "运动" || comp.displayName === "Motion") {
+                    for (var p = 0; p < comp.properties.numItems; p++) {
+                        var prop = comp.properties[p];
+                        if (prop.displayName === "位置" || prop.displayName === "Position") {
+                            prop.setValue([0.5, 0.5 + (dyPx / SEQ_H)], true);
+                            return;
+                        }
+                    }
+                }
+            }
+        } catch (eSh) {}
+    }
+
+    /**
+     * Native Pr GPU 60fps Marquee Scroll on V8 (track index 7) using 3840x1080 title_scroll.mogrt:
+     * 1. Effect #1: Transform (GPU) -> Position keyframes scroll left smoothly (1.5s pause -> 82px/s -> 1.5s pause)
+     * 2. Effect #2: Crop (GPU) -> fixed screen window [X=242..1868] (Left=6.30%, Right=51.35% on 3840w canvas)
+     * 3. Motion -> Position = [1.0, 0.5] aligns 3840w canvas left edge (X=0) with 1920w sequence left edge (X=0)
+     */
+    function animateGpuMarqueeTitle(qeSeq, clip, durSec, overflowPx) {
+        try {
+            // Align 3840x1080 left edge to 1920x1080 left edge
+            for (var c = 0; c < clip.components.numItems; c++) {
+                var comp = clip.components[c];
+                if (comp.matchName === "AE.ADBE Motion" || comp.displayName === "运动" || comp.displayName === "Motion") {
+                    for (var p = 0; p < comp.properties.numItems; p++) {
+                        var prop = comp.properties[p];
+                        if (prop.displayName === "位置" || prop.displayName === "Position") {
+                            prop.setValue([1.0, 0.5], true);
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+
+            var qeTrack = qeSeq.getVideoTrackAt(6);
+            var targetTicks = String(clip.start.ticks);
+            var qeClip = null;
+            for (var i = qeTrack.numItems - 1; i >= 0; i--) {
+                var item = qeTrack.getItemAt(i);
+                if (item && item.type === "Clip" && String(item.start.ticks) === targetTicks) {
+                    qeClip = item;
+                    break;
+                }
+            }
+            if (!qeClip) return false;
+
+            // 1. Add GPU Transform effect FIRST
+            var tfFx = findQeVideoEffect(["变换", "Transform"]);
+            if (tfFx) qeClip.addVideoEffect(tfFx);
+
+            // 2. Add GPU Crop effect SECOND (clips scrolled text cleanly to X=242..1868)
+            var cropFx = findQeVideoEffect(["裁剪", "Crop"]);
+            if (cropFx) qeClip.addVideoEffect(cropFx);
+
+            var baseIn = clip.inPoint.seconds;
+            var speed = 82.0; // px/sec
+            var startPause = 1.5;
+            var endPause = 1.5;
+            var scrollTime = Math.max(1.0, overflowPx / speed);
+            var cycle = startPause + scrollTime + endPause;
+
+            for (var c2 = 0; c2 < clip.components.numItems; c2++) {
+                var comp2 = clip.components[c2];
+                var mName = comp2.matchName || "";
+                var dName = comp2.displayName || "";
+
+                if (mName.indexOf("Geometry2") >= 0 || dName === "变换" || dName === "Transform") {
+                    for (var p2 = 0; p2 < comp2.properties.numItems; p2++) {
+                        var pr2 = comp2.properties[p2];
+                        if (pr2.displayName === "位置" || pr2.displayName === "Position") {
+                            pr2.setTimeVarying(true);
+                            // Transform Position uses normalized [0..1] on the 3840x1080 clip -> center is [0.5, 0.5]
+                            var shiftNorm = overflowPx / 3840.0;
+                            var tCursor = 0.0;
+                            while (tCursor < durSec) {
+                                var t0 = secsToTime(baseIn + tCursor);
+                                pr2.addKey(t0);
+                                pr2.setValueAtKey(t0, [0.5, 0.5], true);
+
+                                var t1Sec = Math.min(durSec, tCursor + startPause);
+                                var t1 = secsToTime(baseIn + t1Sec);
+                                pr2.addKey(t1);
+                                pr2.setValueAtKey(t1, [0.5, 0.5], true);
+
+                                var t2Sec = Math.min(durSec, tCursor + startPause + scrollTime);
+                                var frac = (t2Sec - t1Sec) / scrollTime;
+                                var t2 = secsToTime(baseIn + t2Sec);
+                                pr2.addKey(t2);
+                                pr2.setValueAtKey(t2, [0.5 - shiftNorm * frac, 0.5], true);
+
+                                var t3Sec = Math.min(durSec, tCursor + cycle);
+                                if (t3Sec > t2Sec + 0.05) {
+                                    var t3 = secsToTime(baseIn + t3Sec);
+                                    pr2.addKey(t3);
+                                    pr2.setValueAtKey(t3, [0.5 - shiftNorm * frac, 0.5], true);
+                                }
+                                tCursor += cycle;
+                            }
+                            break;
+                        }
+                    }
+                } else if (mName.indexOf("Crop") >= 0 || dName === "裁剪" || dName === "Crop") {
+                    for (var p3 = 0; p3 < comp2.properties.numItems; p3++) {
+                        var pr3 = comp2.properties[p3];
+                        if (pr3.displayName === "左侧" || pr3.displayName === "Left") {
+                            pr3.setValue(6.3, true); // 242 / 3840
+                        } else if (pr3.displayName === "右侧" || pr3.displayName === "Right") {
+                            pr3.setValue(52.5, true); // (3840 - 1824) / 3840 -> aligns cleanly with Pr native caption right edge (95%)
+                        } else if (pr3.displayName === "边缘羽化" || pr3.displayName === "Edge Feather") {
+                            pr3.setValue(0, true);
+                        }
+                    }
+                }
+            }
+            return true;
+        } catch (eMq) {
+            return false;
+        }
     }
 
     /** Parse native video resolution (width, height) from ProjectItem column metadata */
@@ -326,8 +585,11 @@
         return null;
     }
 
-    function applyFrostedBarEffects(qeSeq, clip, cropBox) {
-        // cropBox: { top, bottom, left, right } in percentages (0..99)
+    function applyFrostedBarEffects(qeSeq, clip, cropBox, beatData, renderedW, renderedH) {
+        // True optical glass mask pipeline on V2 (strict GPU effect order):
+        //   1. Transform (optional beat-reactive scale/shake matching V1 BEFORE crop!)
+        //   2. Gaussian Blur (32, Repeat Edge Pixels)
+        //   3. Crop (fixed 4-side sharp screen rectangle -> glass frame stays rock-steady while refracted content moves!)
         var appliedBlur = false;
         try {
             var qeTrack = qeSeq.getVideoTrackAt(1);
@@ -342,6 +604,11 @@
             }
             if (!qeClip) return false;
 
+            if (beatData && beatData.keyframes && beatData.keyframes.length > 0) {
+                var tfFx = findQeVideoEffect(["变换", "Transform"]);
+                if (tfFx) qeClip.addVideoEffect(tfFx);
+            }
+
             var blurFx = findQeVideoEffect(["高斯模糊", "Gaussian Blur"]);
             if (blurFx) {
                 qeClip.addVideoEffect(blurFx);
@@ -352,16 +619,51 @@
             if (cropFx) {
                 qeClip.addVideoEffect(cropFx);
             }
+
+            // 4. Add Drop Shadow AFTER Crop so the entire floating glass rectangle casts a soft 3D shadow onto V1
+            var shadowFx = findQeVideoEffect(["投影", "Drop Shadow"]);
+            if (shadowFx) {
+                qeClip.addVideoEffect(shadowFx);
+            }
         } catch (eQE) {}
 
-        // Medium-strength Gaussian Blur (28) preserves silhouette/motion; sharp 4-side Crop creates floating glass gap
+        // Configure Transform keyframes (if beatData), Gaussian Blur (32), and fixed 4-side sharp Crop
         try {
             for (var c = 0; c < clip.components.numItems; c++) {
                 var comp = clip.components[c];
                 var mName = comp.matchName || "";
                 var dName = comp.displayName || "";
 
-                if (mName.indexOf("Gaussian Blur") >= 0 || dName.indexOf("高斯模糊") >= 0 || dName.indexOf("Gaussian Blur") >= 0) {
+                if (beatData && beatData.keyframes && (mName.indexOf("Geometry2") >= 0 || dName === "变换" || dName === "Transform")) {
+                    var tfScale = null;
+                    var tfPos = null;
+                    for (var pt = 0; pt < comp.properties.numItems; pt++) {
+                        var prt = comp.properties[pt];
+                        var pn = prt.displayName;
+                        // In Pr's Transform effect (Geometry2), uniform scale is controlled by "缩放高度" / "Scale Height"
+                        if (pn === "缩放高度" || pn === "Scale Height" || pn === "缩放" || pn === "Scale") {
+                            tfScale = prt;
+                        } else if (pn === "位置" || pn === "Position") {
+                            tfPos = prt;
+                        }
+                    }
+                    if (tfScale && tfPos) {
+                        tfScale.setTimeVarying(true);
+                        tfPos.setTimeVarying(true);
+                        var baseInSec = clip.inPoint.seconds;
+                        var rw = renderedW || SEQ_W;
+                        var rh = renderedH || SEQ_H;
+                        var kfs = beatData.keyframes;
+                        for (var ki = 0; ki < kfs.length; ki++) {
+                            var kf = kfs[ki];
+                            var kt = secsToTime(baseInSec + kf.t);
+                            tfScale.addKey(kt);
+                            tfScale.setValueAtKey(kt, kf.scale, true);
+                            tfPos.addKey(kt);
+                            tfPos.setValueAtKey(kt, [0.5 + (kf.dx / rw), 0.5 + (kf.dy / rh)], true);
+                        }
+                    }
+                } else if (mName.indexOf("Gaussian Blur") >= 0 || dName.indexOf("高斯模糊") >= 0 || dName.indexOf("Gaussian Blur") >= 0) {
                     for (var p1 = 0; p1 < comp.properties.numItems; p1++) {
                         var pr1 = comp.properties[p1];
                         if (pr1.displayName === "模糊度" || pr1.displayName === "Blurriness") {
@@ -384,6 +686,20 @@
                             pr2.setValue(cropBox.right, true);
                         } else if (dn === "边缘羽化" || dn === "Edge Feather") {
                             pr2.setValue(0, true); // Sharp 90-degree glass edges, no feathering
+                        }
+                    }
+                } else if (mName.indexOf("Drop Shadow") >= 0 || dName === "投影" || dName === "Drop Shadow") {
+                    for (var p3 = 0; p3 < comp.properties.numItems; p3++) {
+                        var pr3 = comp.properties[p3];
+                        var sn = pr3.displayName;
+                        if (sn === "不透明度" || sn === "Opacity") {
+                            pr3.setValue(65, true);
+                        } else if (sn === "方向" || sn === "Direction") {
+                            pr3.setValue(180, true);
+                        } else if (sn === "距离" || sn === "Distance") {
+                            pr3.setValue(10, true);
+                        } else if (sn === "柔和度" || sn === "Softness") {
+                            pr3.setValue(38, true);
                         }
                     }
                 }
@@ -431,6 +747,63 @@
         } catch (eSpec) {}
     }
 
+    function animateProgressBarClip(qeSeq, clip) {
+        // Position 1864x4 white bar right on top edge of floating glass (Y=868, X=960)
+        try {
+            for (var c = 0; c < clip.components.numItems; c++) {
+                var comp = clip.components[c];
+                if (comp.matchName === "AE.ADBE Motion" || comp.displayName === "运动" || comp.displayName === "Motion") {
+                    for (var p = 0; p < comp.properties.numItems; p++) {
+                        var prop = comp.properties[p];
+                        if (prop.displayName === "位置" || prop.displayName === "Position") {
+                            prop.setValue([960 / SEQ_W, 868 / SEQ_H], true);
+                        }
+                    }
+                    break;
+                }
+            }
+        } catch (ePos) {}
+
+        // Add native GPU-accelerated Crop effect on V6 (track index 5) and keyframe Right: 100% -> 0%
+        try {
+            var qeTrack = qeSeq.getVideoTrackAt(5);
+            var targetTicks = String(clip.start.ticks);
+            var qeClip = null;
+            for (var i = qeTrack.numItems - 1; i >= 0; i--) {
+                var item = qeTrack.getItemAt(i);
+                if (item && item.type === "Clip" && String(item.start.ticks) === targetTicks) {
+                    qeClip = item;
+                    break;
+                }
+            }
+            if (!qeClip) return false;
+
+            var cropFx = findQeVideoEffect(["裁剪", "Crop"]);
+            if (!cropFx) return false;
+            qeClip.addVideoEffect(cropFx);
+
+            for (var c2 = 0; c2 < clip.components.numItems; c2++) {
+                var comp2 = clip.components[c2];
+                if ((comp2.matchName || "").indexOf("Crop") >= 0 || comp2.displayName === "裁剪" || comp2.displayName === "Crop") {
+                    for (var p2 = 0; p2 < comp2.properties.numItems; p2++) {
+                        var pr2 = comp2.properties[p2];
+                        if (pr2.displayName === "右侧" || pr2.displayName === "Right") {
+                            pr2.setTimeVarying(true);
+                            var tStart = clip.inPoint;
+                            var tEnd = clip.outPoint;
+                            pr2.addKey(tStart);
+                            pr2.setValueAtKey(tStart, 100.0, true);
+                            pr2.addKey(tEnd);
+                            pr2.setValueAtKey(tEnd, 0.0, true);
+                            return true;
+                        }
+                    }
+                }
+            }
+        } catch (eProg) {}
+        return false;
+    }
+
     // -------------------------------------------------------------------------
     // Main Entry
     // -------------------------------------------------------------------------
@@ -473,12 +846,16 @@
             return;
         }
         var introMogrtFile = new File(projectRoot + "/templates/intro.mogrt");
+        var lyricMogrtFile = new File(projectRoot + "/templates/lyric_line.mogrt");
+        var scrollTitleMogrtFile = new File(projectRoot + "/templates/title_scroll.mogrt");
+        var progBarFile = new File(projectRoot + "/templates/progress_bar.png");
 
         var root = project.rootItem;
         var mvBin = getOrCreateBin(root, "MV素材");
         var coverBin = getOrCreateBin(root, "封面素材");
         var specBin = getOrCreateBin(root, "频谱素材");
         var specialBin = getOrCreateBin(root, "特殊模板成片");
+        var progBarItem = progBarFile.exists ? importOrReuse(project, coverBin, progBarFile.fsName, false) : null;
 
         // Resolve and import media items for all songs
         var prepared = [];
@@ -490,7 +867,7 @@
                     song: s,
                     index: s.display_index || (i + 1),
                     isPreRendered: true,
-                    mediaItem: importOrReuse(project, specialBin, prePath),
+                    mediaItem: importOrReuse(project, specialBin, prePath, false),
                     coverItem: null,
                     specItem: null,
                     inSec: 0,
@@ -509,7 +886,7 @@
                 song: s,
                 index: s.display_index || (i + 1),
                 isPreRendered: false,
-                mediaItem: importOrReuse(project, mvBin, vidPath),
+                mediaItem: importOrReuse(project, mvBin, vidPath, false),
                 coverItem: covPath ? importOrReuse(project, coverBin, covPath, false) : null,
                 specItem: specPath ? importOrReuse(project, specBin, specPath, true) : null,
                 inSec: parseTime(s.start),
@@ -536,16 +913,17 @@
         }
         project.activeSequence = targetSeq;
 
-        // Ensure 30fps timebase
+        // Ensure sequence timebase matches playlist.json fps (default 60fps)
+        var targetFps = parseFloat(playlistData.fps) || 60;
         try {
             var settings = targetSeq.getSettings();
-            settings.videoFrameRate = secsToTime(1.0 / 30.0);
+            settings.videoFrameRate = secsToTime(1.0 / targetFps);
             targetSeq.setSettings(settings);
         } catch (eFps) {}
 
-        // Ensure at least 5 video tracks (V1..V5)
+        // Ensure at least 8 video tracks (V1..V8; V8 hosts Pr GPU marquee for long song titles)
         var qeSeq = qe.project.getActiveSequence();
-        while (targetSeq.videoTracks.numTracks < 5) {
+        while (targetSeq.videoTracks.numTracks < 8) {
             try {
                 qeSeq.addTracks(1, targetSeq.videoTracks.numTracks, 0, 0);
             } catch (eTrk) {
@@ -558,6 +936,9 @@
         var v3 = targetSeq.videoTracks.numTracks > 2 ? targetSeq.videoTracks[2] : null;
         var v4 = targetSeq.videoTracks.numTracks > 3 ? targetSeq.videoTracks[3] : null;
         var v5 = targetSeq.videoTracks.numTracks > 4 ? targetSeq.videoTracks[4] : null;
+        var v6 = targetSeq.videoTracks.numTracks > 5 ? targetSeq.videoTracks[5] : null;
+        var v7 = targetSeq.videoTracks.numTracks > 6 ? targetSeq.videoTracks[6] : null;
+        var v8 = targetSeq.videoTracks.numTracks > 7 ? targetSeq.videoTracks[7] : null;
         var a1 = targetSeq.audioTracks[0];
         var a2 = targetSeq.audioTracks.numTracks > 1 ? targetSeq.audioTracks[1] : null;
 
@@ -566,6 +947,9 @@
         clearTrack(v3);
         clearTrack(v4);
         clearTrack(v5);
+        clearTrack(v6);
+        clearTrack(v7);
+        clearTrack(v8);
         clearTrack(a1);
         clearTrack(a2);
 
@@ -574,6 +958,10 @@
         var v2BlurOkCount = 0;
         var v2TotalCount = 0;
         var v5SpecCount = 0;
+        var v6ProgCount = 0;
+        var v7LyricCount = 0;
+        var v8MarqueeCount = 0;
+        var beatMotionCount = 0;
 
         // ---------------------------------------------------------------------
         // 1. Optional Intro Segment
@@ -656,6 +1044,12 @@
                 return v;
             }
 
+            // Optional beat-reactive motion for static-cover MVs (loaded from processed/*_beat.json)
+            var beatData = null;
+            if (song.beat_motion !== "off" && song.beat_path) {
+                beatData = readJsonFile(resolvePath(projectRoot, song.beat_path));
+            }
+
             // Only add V2 floating frosted blur if the fitted video overlaps the floating glass rectangle
             if (v2 && clipBottomY > BAR_TOP + 2 && clipTopY < BAR_BOTTOM - 2) {
                 var cropBox = {
@@ -667,34 +1061,47 @@
 
                 v2.overwriteClip(entry.mediaItem, insTime);
                 var blurClip = v2.clips[v2.clips.numItems - 1];
+                // Keep V2 glass rectangle rock-steady aligned with progress bar & cover (do NOT apply beat shake to V2!)
                 if (Math.abs(fitScale - 100.0) > 0.5) {
                     setClipScale(blurClip, fitScale);
                 }
                 v2TotalCount++;
-                if (applyFrostedBarEffects(qeSeq, blurClip, cropBox)) {
+                if (applyFrostedBarEffects(qeSeq, blurClip, cropBox, beatData, renderedW, renderedH)) {
                     v2BlurOkCount++;
                 }
             }
 
-            // V1/A1 SECOND: Crisp original MV (auto-fitted to frame) + clean single audio track on A1
+            // V1/A1 SECOND: Crisp original MV (auto-fitted + optional beat motion) + clean single audio track on A1
             v1.overwriteClip(entry.mediaItem, insTime);
             var mainClip = v1.clips[v1.clips.numItems - 1];
-            if (Math.abs(fitScale - 100.0) > 0.5) {
+            if (beatData) {
+                if (applyBeatMotionKeyframes(mainClip, beatData, fitScale)) {
+                    beatMotionCount++;
+                }
+            } else if (Math.abs(fitScale - 100.0) > 0.5) {
                 setClipScale(mainClip, fitScale);
             }
 
-            // V3: AE-exported annual.mogrt with live text + DURATION_SEC progress bar injection
-            if (v3) {
+            // V3: Zero-expression annual.mogrt (static frame cached in Pr!)
+            // If title overflows 1626px (~68 half-width units at 44px serif), move title to V8 Pr native GPU marquee
+            var singleLineTitle = String(song.title || "").replace(/\r\n|\r|\n/g, " ").replace(/^\s+|\s+$/g, "");
+            var singleLineAlbum = String(song.album || "").replace(/\r\n|\r|\n/g, " ").replace(/^\s+|\s+$/g, "");
+            var singleLineArtist = String(song.artist || "").replace(/\r\n|\r|\n/g, " ").replace(/^\s+|\s+$/g, "");
+            var titleVisUnits = visualWidth(singleLineTitle);
+            var estTitlePx = titleVisUnits * 23.5;
+            var useGpuMarquee = (v7 && scrollTitleMogrtFile.exists && estTitlePx > 1580);
+
+            if (v3 && annualMogrtFile.exists) {
                 var mogrtClip = targetSeq.importMGT(annualMogrtFile.fsName, secsToTicksStr(curTimeSec), 2, 0);
                 if (mogrtClip) {
                     mogrtClip.end = secsToTime(curTimeSec + dur);
                     var mgtComp = mogrtClip.getMGTComponent();
                     if (mgtComp) {
-                        setMgtNumberProp(mgtComp, "DURATION_SEC", dur);
                         setMgtTextProp(mgtComp, "INDEX_TEXT", "#" + pad2(entry.index));
-                        setMgtTextProp(mgtComp, "TITLE_TEXT", formatTitleText(song.title || "", 44));
-                        setMgtTextProp(mgtComp, "ARTIST_TEXT", song.artist || "");
-                        setMgtTextProp(mgtComp, "REASON_TEXT", formatReasonText(song.reason || "", 22));
+                        setMgtTextProp(mgtComp, "TITLE_TEXT", useGpuMarquee ? "" : singleLineTitle);
+                        setMgtTextProp(mgtComp, "ALBUM_TEXT", singleLineAlbum);
+                        setMgtTextProp(mgtComp, "ARTIST_TEXT", singleLineArtist);
+                        setMgtTextProp(mgtComp, "REASON_TEXT", formatReasonText(song.reason || ""));
                     } else if (!mogrtWarned) {
                         mogrtWarned = true;
                         alert("提示：templates/annual.mogrt 的 getMGTComponent() 返回为空。\n请确认已使用 AE 运行 scripts/build_annual_mogrt_ae.jsx 导出新版模板。");
@@ -702,7 +1109,23 @@
                 }
             }
 
-            // V4: Official 1:1 album cover flush-left with floating glass bar (156x156)
+            // V7 (index 6): Native Pr GPU 60fps marquee scroll for overflowing long titles (0 AE expressions!)
+            if (useGpuMarquee) {
+                var mqClip = targetSeq.importMGT(scrollTitleMogrtFile.fsName, secsToTicksStr(curTimeSec), 6, 0);
+                if (mqClip) {
+                    mqClip.end = secsToTime(curTimeSec + dur);
+                    var mqComp = mqClip.getMGTComponent();
+                    if (mqComp) {
+                        setMgtTextProp(mqComp, "SCROLL_TITLE_TEXT", singleLineTitle);
+                    }
+                    var overflowPx = Math.max(120, Math.round(estTitlePx - 1582 + 60));
+                    if (animateGpuMarqueeTitle(qeSeq, mqClip, dur, overflowPx)) {
+                        v8MarqueeCount++;
+                    }
+                }
+            }
+
+            // V4: Official 1:1 album cover flush-left with floating glass bar (186x186)
             if (v4 && entry.coverItem) {
                 entry.coverItem.setInPoint(secsToTime(0), 4);
                 entry.coverItem.setOutPoint(secsToTime(dur), 4);
@@ -712,7 +1135,7 @@
                 positionCoverClip(covClip);
             }
 
-            // V5: Transparent audio spectrum visualizer directly above the progress bar
+            // V5: Transparent audio spectrum visualizer inside the bottom of the cover
             if (v5 && entry.specItem) {
                 entry.specItem.setInPoint(secsToTime(0), 4);
                 entry.specItem.setOutPoint(secsToTime(dur), 4);
@@ -723,17 +1146,74 @@
                 v5SpecCount++;
             }
 
+            // V6: Native GPU 60fps progress bar (Crop Right 100% -> 0% keyframes)
+            if (v6 && progBarItem) {
+                progBarItem.setInPoint(secsToTime(0), 4);
+                progBarItem.setOutPoint(secsToTime(dur), 4);
+                v6.overwriteClip(progBarItem, insTime);
+                var progClip = v6.clips[v6.clips.numItems - 1];
+                progClip.end = secsToTime(curTimeSec + dur);
+                if (animateProgressBarClip(qeSeq, progClip)) {
+                    v6ProgCount++;
+                }
+            }
+
             curTimeSec += dur;
         }
 
         // Remove any duplicate audio placed onto A2 by V2 frosted-bar clips
         clearTrack(a2);
 
+        // Apply configurable song-to-song video & audio transitions
+        var transApplied = applyTrackTransitions(qeSeq, playlistData.transition || {}, targetFps);
+
+        // Import timeline-aligned bilingual SRT into Premiere Pro Native Caption Track (0 AE CPU overhead!)
+        var srtStatus = "未找到 output/lyrics_timeline.srt";
+        var srtFile = new File(projectRoot + "/output/lyrics_timeline.srt");
+        var srtBin = getOrCreateBin(root, "字幕素材");
+        if (srtFile.exists) {
+            var srtItem = importOrReuse(project, srtBin, srtFile.fsName, true);
+            if (srtItem) {
+                var addedCaption = false;
+                try {
+                    if (typeof targetSeq.createCaptionTrack === "function") {
+                        addedCaption = targetSeq.createCaptionTrack(srtItem, 0);
+                    }
+                } catch (eCap) {}
+                srtStatus = addedCaption
+                    ? "已自动创建 Pr 原生字幕轨 (C1)"
+                    : "已导入「字幕素材」Bin（直接拖入时间线即可生成 C1 原生字幕轨）";
+            }
+        }
+
+        // Auto-import reusable caption track style (templates/推歌.prtextstyle) if not already in project
+        var styleFile = new File(projectRoot + "/templates/推歌.prtextstyle");
+        if (styleFile.exists) {
+            var hasStyle = false;
+            try {
+                for (var si = 0; si < root.children.numItems; si++) {
+                    if (root.children[si].name === "推歌") { hasStyle = true; break; }
+                }
+                if (!hasStyle) {
+                    for (var sbi = 0; sbi < srtBin.children.numItems; sbi++) {
+                        if (srtBin.children[sbi].name === "推歌") { hasStyle = true; break; }
+                    }
+                }
+                if (!hasStyle) {
+                    project.importFiles([styleFile.fsName], true, srtBin, false);
+                }
+            } catch (eSty) {}
+            srtStatus += "（轨道样式「推歌」已自动加载，在 C1 下拉框一键选用）";
+        }
+
         var msg = "assemble_v2.jsx 组装完成！\n"
-            + "序列：" + seqName + "\n"
+            + "序列：" + seqName + " (" + targetFps + "fps)\n"
             + "已装配曲目：" + prepared.length + " 首\n"
-            + "V2 悬浮毛玻璃挂载：" + v2BlurOkCount + " / " + v2TotalCount + "\n"
-            + "V5 音频频谱挂载：" + v5SpecCount + " / " + prepared.length + "\n"
+            + "V1 切歌转场：" + transApplied + " 处 | 封面律动：" + beatMotionCount + " 首\n"
+            + "V2 悬浮毛玻璃：" + v2BlurOkCount + " / " + v2TotalCount + "\n"
+            + "V5 音频频谱：" + v5SpecCount + " / " + prepared.length + " | V6 GPU进度条：" + v6ProgCount + " / " + prepared.length + "\n"
+            + "V7 GPU跑马灯：" + v8MarqueeCount + " 首\n"
+            + "C1 原生双语字幕：" + srtStatus + "\n"
             + "总时长：" + curTimeSec.toFixed(1) + " 秒";
         $.global.__ASSEMBLE_RESULT__ = msg;
         if (!$.global.__MCP_SILENT__) {

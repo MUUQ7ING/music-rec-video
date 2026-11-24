@@ -24,16 +24,33 @@ from pydantic import BaseModel
 import uvicorn
 import yt_dlp
 
-from download import download_mv, slug, RAW_DIR, resolve_file_path, to_relative_path
+from download import (
+    download_mv,
+    is_bilibili_url,
+    slug,
+    RAW_DIR,
+    resolve_file_path,
+    to_relative_path,
+)
 from netease import import_netease_playlist
-from bilibili import search_bilibili
+from bilibili import (
+    search_bilibili,
+    generate_bilibili_qr,
+    poll_bilibili_qr,
+    get_bilibili_login_status,
+    clear_bilibili_cookies,
+)
 from preprocess import preprocess_song
+from spectrum import render_spectrum_mov
+from lyrics import fetch_and_save_lyrics, export_timeline_srt
+from analyze_visuals import analyze_song_visuals
 from renderers import list_renderers, render_song_clip
 from schema import load_playlist as load_playlist_model, save_playlist as save_playlist_model
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_PATH = Path(BASE_DIR)
 PLAYLIST_FILE = os.path.join(BASE_DIR, "playlist.json")
+BILI_COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
 WEB_DIR = os.path.join(BASE_DIR, "web")
 COVERS_DIR = os.path.join(BASE_DIR, "covers")
 os.makedirs(COVERS_DIR, exist_ok=True)
@@ -86,6 +103,10 @@ def save_playlist(data: dict):
             elif os.path.isabs(fp):
                 song["file_path"] = to_relative_path(fp)
     save_playlist_model(data, PLAYLIST_FILE)
+    try:
+        export_timeline_srt(load_playlist_model(PLAYLIST_FILE), BASE_PATH)
+    except Exception:
+        pass
 
 
 @app.get("/")
@@ -95,6 +116,108 @@ def serve_index():
     if not os.path.isfile(index_file):
         raise HTTPException(status_code=404, detail="index.html not found")
     return FileResponse(index_file)
+
+
+@app.get("/api/media/{index}")
+def stream_song_media(index: int):
+    """Stream local video file (normalized preferred) with Range support for precise web trimming."""
+    data = load_playlist()
+    songs = data.get("songs", [])
+    if index < 0 or index >= len(songs):
+        raise HTTPException(status_code=404, detail="Song index out of range")
+    song = songs[index]
+    for key in ("normalized_path", "file_path"):
+        fp = resolve_file_path(song.get(key, ""))
+        if fp and os.path.isfile(fp):
+            return FileResponse(fp, media_type="video/mp4")
+    raise HTTPException(status_code=404, detail="Local media file not found")
+
+
+@app.post("/api/spectrum/{index}")
+def rebuild_single_spectrum(index: int):
+    """Re-render frosted-glass spectrum overlay for a single song after start/end trim changes."""
+    playlist = load_playlist_model(PLAYLIST_FILE)
+    if index < 0 or index >= len(playlist.songs):
+        raise HTTPException(status_code=404, detail="Song index out of range")
+
+    def _run():
+        song = playlist.songs[index]
+        log_task(f"🎨 重新生成频谱: {song.title} ({song.start} - {song.end})")
+        res = render_spectrum_mov(song, BASE_PATH, fps=playlist.fps, log=log_task)
+        if res:
+            save_playlist_model(playlist, PLAYLIST_FILE)
+            log_task(f"✅ 频谱更新完成: {song.title}")
+        else:
+            log_task(f"⚠️ 频谱更新失败: {song.title}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/api/lyrics/{index}")
+def get_song_lyrics(index: int):
+    """Return parsed bilingual lyrics lines for the given song index."""
+    playlist = load_playlist_model(PLAYLIST_FILE)
+    if index < 0 or index >= len(playlist.songs):
+        raise HTTPException(status_code=404, detail="Song index out of range")
+    song = playlist.songs[index]
+    lp = resolve_file_path(song.lyrics_path)
+    if lp and os.path.isfile(lp):
+        try:
+            with open(lp, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"lines": [], "has_translation": False}
+
+
+@app.post("/api/lyrics/{index}")
+def fetch_single_lyrics(index: int):
+    """Fetch or refresh bilingual lyrics from NetEase for a single song."""
+    playlist = load_playlist_model(PLAYLIST_FILE)
+    if index < 0 or index >= len(playlist.songs):
+        raise HTTPException(status_code=404, detail="Song index out of range")
+    song = playlist.songs[index]
+    out = fetch_and_save_lyrics(song, BASE_PATH, force=True, log=log_task)
+    if out and out.is_file():
+        save_playlist_model(playlist, PLAYLIST_FILE)
+        return json.loads(out.read_text(encoding="utf-8"))
+    return {"lines": [], "has_translation": False}
+
+
+@app.post("/api/analyze_visuals")
+def analyze_all_visuals_api():
+    """Run batch lyrics fetch + 3-zone brightness analysis + static-MV beat curve extraction."""
+    with task_lock:
+        if tasks_state["is_downloading"]:
+            raise HTTPException(status_code=409, detail="Another background task is already running")
+        tasks_state["is_downloading"] = True
+        tasks_state["current_song"] = "视觉分析 & 双语歌词"
+        tasks_state["progress_percent"] = 0
+
+    def _run():
+        try:
+            playlist = load_playlist_model(PLAYLIST_FILE)
+            total = max(1, len(playlist.songs))
+            for i, song in enumerate(playlist.songs):
+                with task_lock:
+                    tasks_state["current_song"] = f"分析 {song.title}"
+                    tasks_state["progress_percent"] = int((i / total) * 100)
+                fetch_and_save_lyrics(song, BASE_PATH, force=False, log=log_task)
+                analyze_song_visuals(song, BASE_PATH, log=log_task)
+            save_playlist_model(playlist, PLAYLIST_FILE)
+            srt_path, cues = export_timeline_srt(playlist, BASE_PATH)
+            log_task(f"✅ 视觉亮度、封面律动与双语歌词分析完成！(已导出 {cues} 句原生字幕 -> {srt_path.name})")
+        except Exception as e:
+            log_task(f"❌ 视觉分析异常: {e}")
+        finally:
+            with task_lock:
+                tasks_state["is_downloading"] = False
+                tasks_state["current_song"] = ""
+                tasks_state["progress_percent"] = 100
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started"}
 
 
 @app.get("/api/playlist")
@@ -119,6 +242,10 @@ def get_playlist_api():
         song["has_normalized"] = bool(np and os.path.isfile(np))
         sp = resolve_file_path(song.get("pre_rendered_clip", ""))
         song["has_pre_rendered"] = bool(sp and os.path.isfile(sp))
+        lp = resolve_file_path(song.get("lyrics_path", ""))
+        song["has_lyrics"] = bool(lp and os.path.isfile(lp))
+        bp = resolve_file_path(song.get("beat_path", ""))
+        song["has_beat"] = bool(bp and os.path.isfile(bp))
     return data
 
 
@@ -141,7 +268,7 @@ class NeteaseImportRequest(BaseModel):
 
 @app.post("/api/netease")
 def import_netease_api(req: NeteaseImportRequest):
-    """Parse NetEase Cloud Music playlist link and update playlist.json."""
+    """Parse NetEase Cloud Music playlist link, update playlist.json, and auto-run preprocessing."""
     try:
         count, name = import_netease_playlist(
             input_str=req.url,
@@ -149,9 +276,50 @@ def import_netease_api(req: NeteaseImportRequest):
             append=req.append,
             output_path=PLAYLIST_FILE,
         )
+        # Automatically run background preprocessing (fetch 1:1 covers & normalize any existing videos)
+        if not tasks_state["is_downloading"]:
+            t = threading.Thread(target=_worker_preprocess, args=(False,), daemon=True)
+            t.start()
         return {"status": "ok", "count": count, "playlist_name": name}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/bilibili/status")
+def bilibili_login_status_api():
+    """Return current Bilibili cookies.txt login & VIP status."""
+    return get_bilibili_login_status(BILI_COOKIES_FILE)
+
+
+@app.post("/api/bilibili/qr/generate")
+def bilibili_qr_generate_api():
+    """Generate a new Bilibili web QR login URL and qrcode_key."""
+    try:
+        return generate_bilibili_qr()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bilibili/qr/poll")
+def bilibili_qr_poll_api(qrcode_key: str = Query(..., description="Bilibili QR login key")):
+    """Poll Bilibili QR login status and persist cookies.txt on success."""
+    try:
+        result = poll_bilibili_qr(qrcode_key, BILI_COOKIES_FILE)
+        if result.get("status") == "success":
+            u = result.get("user") or {}
+            vip_tag = f" ({u.get('vip_label') or '大会员'})" if u.get("is_vip") else ""
+            log_task(f"✅ B站扫码登录成功: {u.get('uname', '')}{vip_tag}，已保存 cookies.txt")
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bilibili/logout")
+def bilibili_logout_api():
+    """Clear locally saved Bilibili cookies.txt."""
+    clear_bilibili_cookies(BILI_COOKIES_FILE)
+    log_task("已退出 B 站登录并删除本地 cookies.txt")
+    return {"status": "ok"}
 
 
 @app.get("/api/candidates")
@@ -227,6 +395,24 @@ class DownloadSingleRequest(BaseModel):
     quality: str = "1080"
 
 
+def _preprocess_after_download(index: int, refresh_norm: bool = True):
+    """Ensure 1:1 cover and -14 LUFS loudness normalization are updated right after download."""
+    playlist = load_playlist_model(PLAYLIST_FILE)
+    if index < 0 or index >= len(playlist.songs):
+        return
+    song = playlist.songs[index]
+    if refresh_norm:
+        # Remove stale normalized video so loudness is re-computed from the newly downloaded file
+        stale_norm = BASE_PATH / "processed" / f"{slug(song.title, song.artist)}_norm.mp4"
+        if stale_norm.is_file():
+            try:
+                stale_norm.unlink()
+            except OSError:
+                pass
+    preprocess_song(song, BASE_PATH, force=False, log_fn=log_task)
+    save_playlist_model(playlist, PLAYLIST_FILE)
+
+
 def _worker_download_single(index: int, force: bool, quality: str):
     """Background worker for downloading a single song."""
     with task_lock:
@@ -269,11 +455,12 @@ def _worker_download_single(index: int, force: bool, quality: str):
             return
 
         log_task(f"开始下载 {title} ({quality}p)...")
-        success = download_mv(url, out_path, quality=quality)
+        success = download_mv(url, out_path, quality=quality, log_fn=log_task)
         if success:
             song["file_path"] = to_relative_path(out_path)
             save_playlist(data)
             log_task(f"✓ 下载成功: {title}")
+            _preprocess_after_download(index, refresh_norm=True)
         else:
             log_task(f"✗ 下载失败: {title}")
     except Exception as e:
@@ -308,6 +495,7 @@ def _worker_download_all(force: bool, quality: str):
         songs = data.get("songs", [])
         total = len(songs)
 
+        bili_downloads = 0
         for i, song in enumerate(songs):
             title, artist = song.get("title", ""), song.get("artist", "")
             with task_lock:
@@ -320,6 +508,8 @@ def _worker_download_all(force: bool, quality: str):
             existing_path = resolve_file_path(song.get("file_path", ""))
             if not force and existing_path and os.path.isfile(existing_path):
                 log_task(f"跳过已存在: {title}")
+                # Ensure cover & loudness normalization still exist for already-downloaded songs
+                _preprocess_after_download(i, refresh_norm=False)
                 continue
 
             if force and os.path.isfile(out_path):
@@ -343,13 +533,24 @@ def _worker_download_all(force: bool, quality: str):
                 log_task(f"未找到链接: {title}，跳过")
                 continue
 
+            # Throttle consecutive Bilibili downloads to avoid HTTP 412 risk control
+            if is_bilibili_url(url) and bili_downloads > 0:
+                log_task("[B站] 节流等待 2 秒以防风控...")
+                time.sleep(2.0)
+
             log_task(f"下载 [{i+1}/{total}] {title}...")
-            if download_mv(url, out_path, quality=quality):
-                song["file_path"] = to_relative_path(out_path)
-                save_playlist(data)
-                log_task(f"✓ 成功: {title}")
-            else:
-                log_task(f"✗ 失败: {title}")
+            try:
+                if download_mv(url, out_path, quality=quality, log_fn=log_task):
+                    if is_bilibili_url(url):
+                        bili_downloads += 1
+                    song["file_path"] = to_relative_path(out_path)
+                    save_playlist(data)
+                    log_task(f"✓ 成功: {title}")
+                    _preprocess_after_download(i, refresh_norm=True)
+                else:
+                    log_task(f"✗ 失败: {title}")
+            except Exception as song_err:
+                log_task(f"✗ 下载异常 ({title}): {song_err}")
 
         with task_lock:
             tasks_state["progress_percent"] = 100

@@ -24,6 +24,7 @@
     }
   </script>
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://unpkg.com/qrcode-generator@1.4.4/qrcode.js"></script>
   <style>
     /* Custom scrollbars */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -54,6 +55,12 @@
       </div>
 
       <div class="flex items-center space-x-3">
+        <!-- Bilibili QR Login Button (hidden once logged in) -->
+        <button v-if="!biliUser.logged_in" @click="openBiliLoginModal" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-pink-400"></span>
+          <span>B站扫码登录</span>
+        </button>
+
         <!-- NetEase import button -->
         <button @click="showNeteaseModal = true" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition flex items-center gap-1.5">
           <svg class="w-4 h-4 text-red-400" viewBox="0 0 24 24" fill="currentColor">
@@ -80,9 +87,9 @@
           <span>{{ status.is_downloading ? '下载中: ' + status.current_song : '一键下载全部 1080p' }}</span>
         </button>
 
-        <!-- Preprocess Button -->
-        <button @click="preprocessAll" :disabled="status.is_downloading" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-700/80 hover:bg-emerald-600 disabled:opacity-50 text-white border border-emerald-600/50 transition">
-          预处理 (封面+响度)
+        <!-- Visual Analysis & Bilingual Lyrics Button -->
+        <button @click="analyzeAllVisuals" :disabled="status.is_downloading" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-700/80 hover:bg-emerald-600 disabled:opacity-50 text-white border border-emerald-600/50 transition">
+          ✨ 视觉分析与歌词
         </button>
 
         <!-- Special AE Render Button -->
@@ -124,7 +131,7 @@
           </div>
           <div>
             <div class="font-medium text-white text-sm">Premiere Pro 快速使用指引</div>
-            <div class="text-zinc-400 mt-0.5">选好素材并完成「下载 + 预处理（1:1 封面 / -14 LUFS）」后，在 Pr 中通过 <span class="text-zinc-200 font-mono bg-zinc-800 px-1 py-0.5 rounded">ExtendScript Debugger</span> 或 <span class="text-zinc-200 font-mono bg-zinc-800 px-1 py-0.5 rounded">文件 → 脚本 → 运行脚本</span> 运行 <span class="text-brand-300 font-mono">scripts/assemble_v2.jsx</span>，配合 <span class="text-brand-300 font-mono">templates/annual.mogrt</span> 自动生成！</div>
+            <div class="text-zinc-400 mt-0.5">导入网易云歌单自动拉取 1:1 封面，下载素材后自动完成 -14 LUFS 响度统一；在 Pr 中通过 <span class="text-zinc-200 font-mono bg-zinc-800 px-1 py-0.5 rounded">ExtendScript Debugger</span> 或 <span class="text-zinc-200 font-mono bg-zinc-800 px-1 py-0.5 rounded">文件 → 脚本 → 运行脚本</span> 运行 <span class="text-brand-300 font-mono">scripts/assemble_v2.jsx</span>，配合 <span class="text-brand-300 font-mono">templates/annual.mogrt</span> 自动生成！</div>
           </div>
         </div>
         <button @click="showLogs = !showLogs" class="text-xs text-zinc-400 hover:text-zinc-200 underline">
@@ -266,6 +273,20 @@
                 </div>
               </div>
 
+              <!-- Precision Trim Button -->
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] text-zinc-500 font-mono">
+                  片段时长: <span class="text-zinc-300">{{ formatClipDuration(song.start, song.end) }}</span>
+                </span>
+                <button
+                  @click="openTrimModal(idx)"
+                  :disabled="!song.has_file"
+                  class="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-brand-600/90 text-zinc-200 hover:text-white border border-zinc-700 hover:border-brand-500 disabled:opacity-40 disabled:cursor-not-allowed transition flex items-center gap-1.5"
+                >
+                  <span>✂️ 精准定剪试听</span>
+                </button>
+              </div>
+
               <!-- Template & Cover Preview -->
               <div class="grid grid-cols-12 gap-3 items-center">
                 <div class="col-span-3">
@@ -287,10 +308,38 @@
                   </select>
                   <div class="flex flex-wrap gap-1.5 text-[10px] pt-0.5">
                     <span :class="song.has_normalized ? 'text-emerald-400' : 'text-zinc-600'">{{ song.has_normalized ? '✓ -14 LUFS' : '○ 未响度统一' }}</span>
+                    <span :class="song.has_lyrics ? 'text-sky-400' : 'text-zinc-600'">{{ song.has_lyrics ? '✓ 双语歌词' : '○ 无歌词' }}</span>
+                    <span v-if="song.has_beat" class="text-amber-400">✓ 封面律动</span>
                     <span v-if="song.template !== 'annual'" :class="song.has_pre_rendered ? 'text-purple-400' : 'text-amber-400'">
                       {{ song.has_pre_rendered ? '✓ AE 已渲染' : '○ 待 AE 渲染' }}
                     </span>
                   </div>
+                </div>
+              </div>
+
+              <!-- Per-Song Visual & Lyrics Toggles -->
+              <div class="grid grid-cols-3 gap-2 pt-0.5">
+                <div>
+                  <label class="block text-[10px] text-zinc-500 mb-1">阴影对比</label>
+                  <select v-model="song.shadow_boost" @change="savePlaylist" class="w-full px-2 py-1 text-[11px] bg-zinc-950 border border-zinc-800 rounded text-zinc-300">
+                    <option value="auto">自动</option>
+                    <option value="normal">标准</option>
+                    <option value="strong">强黑影</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-[10px] text-zinc-500 mb-1">封面律动</label>
+                  <select v-model="song.beat_motion" @change="savePlaylist" class="w-full px-2 py-1 text-[11px] bg-zinc-950 border border-zinc-800 rounded text-zinc-300">
+                    <option value="auto">自动</option>
+                    <option value="on">开启</option>
+                    <option value="off">关闭</option>
+                  </select>
+                </div>
+                <div class="flex flex-col justify-end">
+                  <label class="flex items-center gap-1.5 text-[11px] text-zinc-300 cursor-pointer bg-zinc-950 border border-zinc-800 rounded px-2 py-1">
+                    <input type="checkbox" v-model="song.lyrics_enabled" @change="savePlaylist" class="rounded bg-zinc-900 border-zinc-700 text-brand-600" />
+                    <span>显示歌词</span>
+                  </label>
                 </div>
               </div>
 
@@ -433,6 +482,158 @@
       </div>
     </main>
 
+    <!-- Precision Trim & Bilingual Lyrics Calibration Modal -->
+    <div v-if="showTrimModal" class="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+      <div class="bg-zinc-900 border border-zinc-700 rounded-2xl w-full max-w-5xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+        <div class="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between">
+          <div class="min-w-0 pr-4">
+            <h3 class="font-bold text-white text-sm truncate">✂️ 精准定剪 & 歌词同步校准 — {{ trimSongTitle }}</h3>
+            <p class="text-[11px] text-zinc-400 mt-0.5">快捷键：<kbd class="px-1 bg-zinc-800 rounded text-zinc-300">Space</kbd> 播放/暂停 · <kbd class="px-1 bg-zinc-800 rounded text-zinc-300">I</kbd> 设入点 · <kbd class="px-1 bg-zinc-800 rounded text-zinc-300">O</kbd> 设出点 · <kbd class="px-1 bg-zinc-800 rounded text-zinc-300">←/→</kbd> 步进 0.5s</p>
+          </div>
+          <button @click="closeTrimModal" class="text-zinc-400 hover:text-white text-lg">✕</button>
+        </div>
+
+        <div class="p-5 grid grid-cols-1 lg:grid-cols-12 gap-5 overflow-y-auto">
+          <!-- Left Column: Video Player & In/Out Controls -->
+          <div class="lg:col-span-7 space-y-4">
+            <!-- Video Player -->
+            <div class="relative bg-black rounded-xl overflow-hidden border border-zinc-800 aspect-video flex items-center justify-center">
+              <video
+                ref="trimVideoRef"
+                :src="trimVideoUrl"
+                controls
+                class="w-full h-full object-contain"
+                @loadedmetadata="onTrimLoaded"
+                @timeupdate="onTrimTimeUpdate"
+              ></video>
+            </div>
+
+            <!-- Visual Segment Progress Bar -->
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between text-xs font-mono">
+                <span class="text-zinc-400">当前位置: <span class="text-white font-bold">{{ formatSec(trimCurrentSec) }}</span> / {{ formatSec(trimTotalSec) }}</span>
+                <span class="text-emerald-400 font-bold">区间: {{ formatSec(trimStartSec) }} → {{ formatSec(trimEndSec) }} ({{ Math.max(0, trimEndSec - trimStartSec).toFixed(1) }}s)</span>
+              </div>
+              <div class="relative h-2.5 bg-zinc-950 rounded-full overflow-hidden border border-zinc-800">
+                <div
+                  v-if="trimTotalSec > 0"
+                  class="absolute top-0 bottom-0 bg-brand-500/50 border-x-2 border-brand-400"
+                  :style="{
+                    left: Math.min(100, (trimStartSec / trimTotalSec) * 100) + '%',
+                    width: Math.max(0.5, ((trimEndSec - trimStartSec) / trimTotalSec) * 100) + '%'
+                  }"
+                ></div>
+                <div
+                  v-if="trimTotalSec > 0"
+                  class="absolute top-0 bottom-0 w-0.5 bg-white shadow"
+                  :style="{ left: Math.min(100, (trimCurrentSec / trimTotalSec) * 100) + '%' }"
+                ></div>
+              </div>
+            </div>
+
+            <!-- Action Controls -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <!-- In-Point Panel -->
+              <div class="bg-zinc-950/90 border border-zinc-800 rounded-xl p-3 space-y-2">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium text-zinc-300">入点 (Start)</span>
+                  <span class="text-sm font-mono font-bold text-brand-400">{{ formatSec(trimStartSec) }}</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <button @click="nudgeTrim('start', -1)" class="flex-1 py-1 text-[11px] font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded">-1s</button>
+                  <button @click="nudgeTrim('start', -0.1)" class="flex-1 py-1 text-[11px] font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded">-0.1s</button>
+                  <button @click="setTrimPoint('start')" class="px-2 py-1 text-[11px] font-medium bg-brand-600 hover:bg-brand-500 text-white rounded">当前</button>
+                  <button @click="nudgeTrim('start', 0.1)" class="flex-1 py-1 text-[11px] font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded">+0.1s</button>
+                  <button @click="nudgeTrim('start', 1)" class="flex-1 py-1 text-[11px] font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded">+1s</button>
+                </div>
+              </div>
+
+              <!-- Out-Point Panel -->
+              <div class="bg-zinc-950/90 border border-zinc-800 rounded-xl p-3 space-y-2">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium text-zinc-300">出点 (End)</span>
+                  <span class="text-sm font-mono font-bold text-emerald-400">{{ formatSec(trimEndSec) }}</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <button @click="nudgeTrim('end', -1)" class="flex-1 py-1 text-[11px] font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded">-1s</button>
+                  <button @click="nudgeTrim('end', -0.1)" class="flex-1 py-1 text-[11px] font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded">-0.1s</button>
+                  <button @click="setTrimPoint('end')" class="px-2 py-1 text-[11px] font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded">当前</button>
+                  <button @click="nudgeTrim('end', 0.1)" class="flex-1 py-1 text-[11px] font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded">+0.1s</button>
+                  <button @click="nudgeTrim('end', 1)" class="flex-1 py-1 text-[11px] font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded">+1s</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="flex flex-wrap items-center justify-between gap-2 pt-1">
+              <div class="flex items-center gap-2">
+                <button @click="previewTrimSegment" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition">
+                  {{ trimLoopPlaying ? '⏹ 停止试听' : '▶ 试听截取区间' }}
+                </button>
+                <button @click="seekTrimEndPreview" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition">
+                  ⏭ 结尾前 3 秒
+                </button>
+              </div>
+              <label class="flex items-center gap-1.5 text-xs text-zinc-300 cursor-pointer">
+                <input type="checkbox" v-model="trimRebuildSpectrum" class="rounded bg-zinc-950 border-zinc-700 text-brand-600" />
+                保存后更新频谱
+              </label>
+            </div>
+          </div>
+
+          <!-- Right Column: Bilingual Lyrics Live Sync Calibration -->
+          <div class="lg:col-span-5 flex flex-col bg-zinc-950/90 border border-zinc-800 rounded-xl overflow-hidden max-h-[460px]">
+            <div class="px-3.5 py-2.5 border-b border-zinc-800 flex items-center justify-between gap-2">
+              <span class="text-xs font-semibold text-zinc-200">🎤 双语歌词校准</span>
+              <button @click="refetchTrimLyrics" class="px-2 py-0.5 text-[11px] rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700">
+                🔄 拉取网易云歌词
+              </button>
+            </div>
+            <div class="px-3.5 py-2 border-b border-zinc-800/80 flex items-center justify-between gap-1 text-[11px] bg-zinc-900/50">
+              <span class="text-zinc-400">偏移: <strong class="font-mono text-sky-400">{{ trimLyricsOffset >= 0 ? '+' : '' }}{{ trimLyricsOffset.toFixed(1) }}s</strong></span>
+              <div class="flex items-center gap-1">
+                <button @click="nudgeLyricsOffset(-0.5)" class="px-1.5 py-0.5 font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded">-0.5</button>
+                <button @click="nudgeLyricsOffset(-0.1)" class="px-1.5 py-0.5 font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded">-0.1</button>
+                <button @click="trimLyricsOffset = 0" class="px-1.5 py-0.5 font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-400 rounded">归零</button>
+                <button @click="nudgeLyricsOffset(0.1)" class="px-1.5 py-0.5 font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded">+0.1</button>
+                <button @click="nudgeLyricsOffset(0.5)" class="px-1.5 py-0.5 font-mono bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded">+0.5</button>
+              </div>
+            </div>
+            <div class="flex-1 overflow-y-auto p-2.5 space-y-1.5 text-xs">
+              <div v-if="trimLyricsLines.length === 0" class="text-center text-zinc-500 py-10 text-xs">
+                暂无歌词（纯音乐或未拉取），可点击右上角拉取网易云歌词
+              </div>
+              <div
+                v-for="(ln, lIdx) in trimLyricsLines"
+                :key="lIdx"
+                :class="[
+                  'p-2 rounded-lg border transition flex items-start justify-between gap-2',
+                  isActiveLyricLine(lIdx) ? 'bg-sky-950/60 border-sky-500/70 text-white' : 'bg-zinc-900/60 border-zinc-800/70 text-zinc-400 hover:border-zinc-700'
+                ]"
+              >
+                <div class="min-w-0 flex-1">
+                  <div class="text-[10px] font-mono text-zinc-500">{{ formatSec(ln.time + trimLyricsOffset) }}</div>
+                  <div class="text-xs leading-snug break-words" :class="isActiveLyricLine(lIdx) ? 'text-white font-medium' : 'text-zinc-300'">{{ ln.orig }}</div>
+                  <div v-if="ln.trans" class="text-[11px] text-zinc-400 leading-snug mt-0.5 break-words">{{ ln.trans }}</div>
+                </div>
+                <button
+                  @click="alignLyricToCurrent(ln)"
+                  title="播放到这句刚出口时点击，自动对齐整首歌歌词"
+                  class="shrink-0 px-2 py-1 text-[10px] rounded bg-sky-700/70 hover:bg-sky-600 text-white"
+                >
+                  👆 对齐
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="px-5 py-3.5 bg-zinc-950 border-t border-zinc-800 flex justify-end gap-3">
+          <button @click="closeTrimModal" class="px-4 py-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200">取消</button>
+          <button @click="applyTrimChanges" class="px-4 py-1.5 text-xs font-medium rounded-lg bg-brand-600 hover:bg-brand-500 text-white transition">确认保存入出点与歌词偏移</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Reorder Playlist Modal -->
     <div v-if="showReorderModal" class="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
       <div class="bg-zinc-900 border border-zinc-700 rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
@@ -535,6 +736,73 @@
       </div>
     </div>
 
+    <!-- Bilibili QR Login Modal -->
+    <div v-if="showBiliLoginModal" class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" @click.self="closeBiliLoginModal">
+      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden">
+        <div class="px-5 py-4 border-b border-zinc-800 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-pink-400"></span>
+            <h3 class="text-sm font-bold text-white">B站扫码登录（解锁高清 / 60帧）</h3>
+          </div>
+          <button @click="closeBiliLoginModal" class="text-zinc-400 hover:text-white text-lg leading-none">&times;</button>
+        </div>
+
+        <div class="p-6 flex flex-col items-center text-center space-y-4">
+          <!-- Logged-in Summary Banner -->
+          <div v-if="biliUser.logged_in" class="w-full px-3.5 py-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-200 flex items-center justify-between">
+            <div class="text-left">
+              <div class="font-medium">已登录：{{ biliUser.uname }}</div>
+              <div class="text-[11px] text-emerald-300/80 mt-0.5">
+                {{ biliUser.is_vip ? (biliUser.vip_label || '大会员') + ' · 支持 1080P60 / 4K' : '普通账号 · 支持 1080P' }}
+              </div>
+            </div>
+            <button @click="logoutBilibili" class="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-red-900/60 text-zinc-200 hover:text-red-200 border border-zinc-700 transition">
+              退出
+            </button>
+          </div>
+
+          <!-- QR Code Display -->
+          <div class="w-52 h-52 rounded-2xl bg-white p-3 flex items-center justify-center shadow-inner relative">
+            <div v-if="biliQrLoading" class="text-xs text-zinc-500">正在生成二维码...</div>
+            <div v-else-if="biliQrSvg" v-html="biliQrSvg" class="w-full h-full flex items-center justify-center"></div>
+            <div v-else class="text-xs text-red-500 px-2">{{ biliQrMessage || '二维码加载失败' }}</div>
+
+            <!-- Expired Overlay -->
+            <div v-if="biliQrStatus === 'expired'" class="absolute inset-0 bg-black/75 rounded-2xl flex flex-col items-center justify-center gap-2">
+              <span class="text-xs text-zinc-200">二维码已过期</span>
+              <button @click="refreshBiliQr" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-pink-600 hover:bg-pink-500 text-white transition">
+                刷新二维码
+              </button>
+            </div>
+          </div>
+
+          <!-- Live Status Message -->
+          <div class="text-xs font-medium"
+            :class="{
+              'text-zinc-300': biliQrStatus === 'waiting',
+              'text-amber-300': biliQrStatus === 'scanned',
+              'text-emerald-400': biliQrStatus === 'success',
+              'text-red-400': biliQrStatus === 'expired' || biliQrStatus === 'error',
+            }">
+            {{ biliQrMessage }}
+          </div>
+
+          <p class="text-[11px] text-zinc-500 leading-relaxed">
+            登录凭证仅保存在本地 <span class="font-mono text-zinc-400">cookies.txt</span>，供 <span class="font-mono text-zinc-400">yt-dlp</span> 下载高清素材使用。
+          </p>
+
+          <div class="w-full flex justify-end gap-2 pt-1">
+            <button @click="refreshBiliQr" class="px-3 py-1.5 text-xs rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition">
+              刷新二维码
+            </button>
+            <button @click="closeBiliLoginModal" class="px-3 py-1.5 text-xs rounded-lg bg-brand-600 hover:bg-brand-500 text-white transition">
+              关闭
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <script>
@@ -558,11 +826,236 @@
         const neteaseAppend = ref(false);
         const importingNetease = ref(false);
 
+        // Bilibili QR Login State
+        const biliUser = ref({ logged_in: false, uname: '', is_vip: false, vip_label: '' });
+        const showBiliLoginModal = ref(false);
+        const biliQrLoading = ref(false);
+        const biliQrKey = ref('');
+        const biliQrSvg = ref('');
+        const biliQrStatus = ref('waiting');
+        const biliQrMessage = ref('请使用手机 B 站 App 扫码登录');
+        let biliQrPollTimer = null;
+
         // Reorder Modal State
         const showReorderModal = ref(false);
         const reorderDraft = ref([]);
         const dragSrcIdx = ref(null);
         const dragOverIdx = ref(null);
+
+        // Precision Trim Modal State
+        const showTrimModal = ref(false);
+        const trimSongIdx = ref(-1);
+        const trimSongTitle = ref('');
+        const trimVideoUrl = ref('');
+        const trimVideoRef = ref(null);
+        const trimStartSec = ref(0);
+        const trimEndSec = ref(30);
+        const trimCurrentSec = ref(0);
+        const trimTotalSec = ref(0);
+        const trimLoopPlaying = ref(false);
+        const trimRebuildSpectrum = ref(true);
+        const trimLyricsLines = ref([]);
+        const trimLyricsOffset = ref(0);
+
+        const loadTrimLyrics = async (idx) => {
+          trimLyricsLines.value = [];
+          try {
+            const res = await fetch(`/api/lyrics/${idx}`);
+            const data = await res.json();
+            trimLyricsLines.value = data.lines || [];
+          } catch (e) {}
+        };
+
+        const refetchTrimLyrics = async () => {
+          if (trimSongIdx.value < 0) return;
+          try {
+            const res = await fetch(`/api/lyrics/${trimSongIdx.value}`, { method: 'POST' });
+            const data = await res.json();
+            trimLyricsLines.value = data.lines || [];
+          } catch (e) {}
+        };
+
+        const nudgeLyricsOffset = (delta) => {
+          trimLyricsOffset.value = Math.round((trimLyricsOffset.value + delta) * 10) / 10;
+        };
+
+        const alignLyricToCurrent = (ln) => {
+          const cur = trimVideoRef.value ? trimVideoRef.value.currentTime : trimCurrentSec.value;
+          trimLyricsOffset.value = Math.round((cur - (ln.time || 0)) * 10) / 10;
+        };
+
+        const isActiveLyricLine = (lIdx) => {
+          const lines = trimLyricsLines.value;
+          if (!lines || lIdx < 0 || lIdx >= lines.length) return false;
+          const cur = trimCurrentSec.value;
+          const start = (lines[lIdx].time || 0) + trimLyricsOffset.value;
+          const end = (lIdx + 1 < lines.length) ? ((lines[lIdx + 1].time || 0) + trimLyricsOffset.value) : (start + 6);
+          return cur >= start && cur < end;
+        };
+
+        const analyzeAllVisuals = async () => {
+          try {
+            const res = await fetch('/api/analyze_visuals', { method: 'POST' });
+            if (!res.ok) {
+              const err = await res.json();
+              alert(err.detail || '任务启动失败');
+              return;
+            }
+            showLogs.value = true;
+          } catch (e) {
+            alert('触发视觉分析失败: ' + e);
+          }
+        };
+
+        const parseTimeStr = (t) => {
+          if (typeof t === 'number') return t;
+          const s = String(t || '0').trim();
+          const parts = s.split(':');
+          if (parts.length === 2) return (parseInt(parts[0], 10) || 0) * 60 + (parseFloat(parts[1]) || 0);
+          if (parts.length === 3) return (parseInt(parts[0], 10) || 0) * 3600 + (parseInt(parts[1], 10) || 0) * 60 + (parseFloat(parts[2]) || 0);
+          return parseFloat(s) || 0;
+        };
+
+        const formatSec = (sec) => {
+          const s = Math.max(0, Number(sec) || 0);
+          const m = Math.floor(s / 60);
+          const rem = (s - m * 60).toFixed(1);
+          const padded = parseFloat(rem) < 10 ? '0' + rem : rem;
+          return `${m}:${padded}`;
+        };
+
+        const formatClipDuration = (startStr, endStr) => {
+          const d = parseTimeStr(endStr) - parseTimeStr(startStr);
+          return d > 0 ? `${d.toFixed(1)}s` : '--';
+        };
+
+        const onTrimKeydown = (e) => {
+          if (!showTrimModal.value) return;
+          const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+          if (tag === 'input' || tag === 'textarea') return;
+          const v = trimVideoRef.value;
+          if (!v) return;
+          if (e.code === 'Space') {
+            e.preventDefault();
+            if (v.paused) v.play(); else { v.pause(); trimLoopPlaying.value = false; }
+          } else if (e.key === 'i' || e.key === 'I') {
+            e.preventDefault();
+            setTrimPoint('start');
+          } else if (e.key === 'o' || e.key === 'O') {
+            e.preventDefault();
+            setTrimPoint('end');
+          } else if (e.code === 'ArrowLeft') {
+            e.preventDefault();
+            v.currentTime = Math.max(0, v.currentTime - 0.5);
+          } else if (e.code === 'ArrowRight') {
+            e.preventDefault();
+            v.currentTime = Math.min(v.duration || 9999, v.currentTime + 0.5);
+          }
+        };
+
+        const openTrimModal = (idx) => {
+          const song = playlist.value.songs[idx];
+          if (!song || !song.has_file) return;
+          trimSongIdx.value = idx;
+          trimSongTitle.value = `${song.artist} - ${song.title}`;
+          trimVideoUrl.value = `/api/media/${idx}?t=${Date.now()}`;
+          trimStartSec.value = parseTimeStr(song.start);
+          trimEndSec.value = parseTimeStr(song.end);
+          trimCurrentSec.value = trimStartSec.value;
+          trimTotalSec.value = 0;
+          trimLoopPlaying.value = false;
+          trimLyricsOffset.value = parseFloat(song.lyrics_offset) || 0;
+          loadTrimLyrics(idx);
+          showTrimModal.value = true;
+          window.addEventListener('keydown', onTrimKeydown);
+        };
+
+        const closeTrimModal = () => {
+          if (trimVideoRef.value) {
+            try { trimVideoRef.value.pause(); } catch (e) {}
+          }
+          trimLoopPlaying.value = false;
+          showTrimModal.value = false;
+          window.removeEventListener('keydown', onTrimKeydown);
+        };
+
+        const onTrimLoaded = () => {
+          const v = trimVideoRef.value;
+          if (!v) return;
+          trimTotalSec.value = v.duration || 0;
+          if (trimStartSec.value > 0 && trimStartSec.value < trimTotalSec.value) {
+            v.currentTime = trimStartSec.value;
+          }
+        };
+
+        const onTrimTimeUpdate = () => {
+          const v = trimVideoRef.value;
+          if (!v) return;
+          trimCurrentSec.value = v.currentTime || 0;
+          if (trimLoopPlaying.value && trimCurrentSec.value >= trimEndSec.value) {
+            v.pause();
+            v.currentTime = trimEndSec.value;
+            trimLoopPlaying.value = false;
+          }
+        };
+
+        const setTrimPoint = (which) => {
+          const v = trimVideoRef.value;
+          const cur = v ? Math.round(v.currentTime * 10) / 10 : trimCurrentSec.value;
+          if (which === 'start') {
+            trimStartSec.value = cur;
+            if (trimEndSec.value <= cur) trimEndSec.value = Math.min(trimTotalSec.value || cur + 15, cur + 15);
+          } else {
+            trimEndSec.value = cur;
+            if (trimStartSec.value >= cur) trimStartSec.value = Math.max(0, cur - 15);
+          }
+        };
+
+        const nudgeTrim = (which, delta) => {
+          const v = trimVideoRef.value;
+          const maxT = trimTotalSec.value || 9999;
+          if (which === 'start') {
+            trimStartSec.value = Math.round(Math.max(0, Math.min(trimEndSec.value - 0.5, trimStartSec.value + delta)) * 10) / 10;
+            if (v) v.currentTime = trimStartSec.value;
+          } else {
+            trimEndSec.value = Math.round(Math.max(trimStartSec.value + 0.5, Math.min(maxT, trimEndSec.value + delta)) * 10) / 10;
+            if (v) v.currentTime = Math.max(trimStartSec.value, trimEndSec.value - 1.5);
+          }
+        };
+
+        const previewTrimSegment = () => {
+          const v = trimVideoRef.value;
+          if (!v) return;
+          if (trimLoopPlaying.value) {
+            v.pause();
+            trimLoopPlaying.value = false;
+            return;
+          }
+          v.currentTime = trimStartSec.value;
+          trimLoopPlaying.value = true;
+          v.play();
+        };
+
+        const seekTrimEndPreview = () => {
+          const v = trimVideoRef.value;
+          if (!v) return;
+          v.currentTime = Math.max(trimStartSec.value, trimEndSec.value - 3.0);
+          trimLoopPlaying.value = true;
+          v.play();
+        };
+
+        const applyTrimChanges = async () => {
+          const idx = trimSongIdx.value;
+          if (idx < 0 || idx >= playlist.value.songs.length) return;
+          playlist.value.songs[idx].start = formatSec(trimStartSec.value);
+          playlist.value.songs[idx].end = formatSec(trimEndSec.value);
+          playlist.value.songs[idx].lyrics_offset = trimLyricsOffset.value;
+          await savePlaylist();
+          if (trimRebuildSpectrum.value) {
+            fetch(`/api/spectrum/${idx}`, { method: 'POST' }).catch(() => {});
+          }
+          closeTrimModal();
+        };
 
         const getDefaultQuery = (song) => {
           const cleanTitle = (song.title || '').split('(')[0].split('（')[0].trim().slice(0, 30);
@@ -796,6 +1289,7 @@
               showNeteaseModal.value = false;
               neteaseUrl.value = '';
               await loadPlaylistData();
+              pollStatus();
             } else {
               alert(data.detail || '导入歌单失败');
             }
@@ -829,9 +1323,115 @@
           }
         };
 
+        const loadBiliStatus = async () => {
+          try {
+            const res = await fetch('/api/bilibili/status');
+            if (res.ok) {
+              biliUser.value = await res.json();
+            }
+          } catch (e) {
+            console.error('Failed to check Bilibili login status:', e);
+          }
+        };
+
+        const stopBiliQrPoll = () => {
+          if (biliQrPollTimer) {
+            clearTimeout(biliQrPollTimer);
+            biliQrPollTimer = null;
+          }
+        };
+
+        const renderQrSvg = (text) => {
+          if (typeof window.qrcode !== 'function') return '';
+          const qr = window.qrcode(0, 'M');
+          qr.addData(text);
+          qr.make();
+          // Render responsive SVG that fills the container cleanly
+          return qr.createSvgTag({ scalable: true, margin: 0 }).replace(
+            '<svg ',
+            '<svg class="w-full h-full" '
+          );
+        };
+
+        const pollBiliQrOnce = async () => {
+          if (!showBiliLoginModal.value || !biliQrKey.value) return;
+          try {
+            const res = await fetch(`/api/bilibili/qr/poll?qrcode_key=${encodeURIComponent(biliQrKey.value)}`);
+            const data = await res.json();
+            biliQrStatus.value = data.status || 'error';
+            biliQrMessage.value = data.message || '';
+            if (data.status === 'success') {
+              if (data.user) biliUser.value = data.user;
+              else await loadBiliStatus();
+              stopBiliQrPoll();
+              setTimeout(() => {
+                if (showBiliLoginModal.value && biliQrStatus.value === 'success') {
+                  closeBiliLoginModal();
+                }
+              }, 1200);
+              return;
+            }
+            if (data.status === 'expired' || data.status === 'error') {
+              stopBiliQrPoll();
+              return;
+            }
+          } catch (e) {
+            biliQrStatus.value = 'error';
+            biliQrMessage.value = '轮询扫码状态失败: ' + e;
+            stopBiliQrPoll();
+            return;
+          }
+          biliQrPollTimer = setTimeout(pollBiliQrOnce, 2000);
+        };
+
+        const refreshBiliQr = async () => {
+          stopBiliQrPoll();
+          biliQrLoading.value = true;
+          biliQrSvg.value = '';
+          biliQrStatus.value = 'waiting';
+          biliQrMessage.value = '正在生成二维码...';
+          try {
+            const res = await fetch('/api/bilibili/qr/generate', { method: 'POST' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || '生成二维码失败');
+            biliQrKey.value = data.qrcode_key;
+            biliQrSvg.value = renderQrSvg(data.url);
+            biliQrStatus.value = 'waiting';
+            biliQrMessage.value = '请使用手机 B 站 App 扫码登录';
+            biliQrPollTimer = setTimeout(pollBiliQrOnce, 2000);
+          } catch (e) {
+            biliQrStatus.value = 'error';
+            biliQrMessage.value = String(e.message || e);
+          } finally {
+            biliQrLoading.value = false;
+          }
+        };
+
+        const openBiliLoginModal = async () => {
+          showBiliLoginModal.value = true;
+          await loadBiliStatus();
+          await refreshBiliQr();
+        };
+
+        const closeBiliLoginModal = () => {
+          stopBiliQrPoll();
+          showBiliLoginModal.value = false;
+        };
+
+        const logoutBilibili = async () => {
+          if (!confirm('确定退出 B 站登录并删除本地 cookies.txt 吗？')) return;
+          try {
+            await fetch('/api/bilibili/logout', { method: 'POST' });
+            biliUser.value = { logged_in: false, uname: '', is_vip: false, vip_label: '' };
+          } catch (e) {
+            alert('退出失败: ' + e);
+          }
+        };
+
         onMounted(() => {
           loadPlaylistData();
           loadRenderers();
+          loadBiliStatus();
           pollStatus();
         });
 
@@ -849,6 +1449,16 @@
           neteaseLimit,
           neteaseAppend,
           importingNetease,
+          biliUser,
+          showBiliLoginModal,
+          biliQrLoading,
+          biliQrSvg,
+          biliQrStatus,
+          biliQrMessage,
+          openBiliLoginModal,
+          closeBiliLoginModal,
+          refreshBiliQr,
+          logoutBilibili,
           showReorderModal,
           reorderDraft,
           dragSrcIdx,
@@ -859,6 +1469,34 @@
           onDrop,
           onDragEnd,
           applyReorder,
+          showTrimModal,
+          trimSongTitle,
+          trimVideoUrl,
+          trimVideoRef,
+          trimStartSec,
+          trimEndSec,
+          trimCurrentSec,
+          trimTotalSec,
+          trimLoopPlaying,
+          trimRebuildSpectrum,
+          trimLyricsLines,
+          trimLyricsOffset,
+          refetchTrimLyrics,
+          nudgeLyricsOffset,
+          alignLyricToCurrent,
+          isActiveLyricLine,
+          analyzeAllVisuals,
+          formatSec,
+          formatClipDuration,
+          openTrimModal,
+          closeTrimModal,
+          onTrimLoaded,
+          onTrimTimeUpdate,
+          setTrimPoint,
+          nudgeTrim,
+          previewTrimSegment,
+          seekTrimEndPreview,
+          applyTrimChanges,
           getDefaultQuery,
           setPlatform,
           searchCandidates,

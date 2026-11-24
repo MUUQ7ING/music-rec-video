@@ -143,13 +143,14 @@ def convert_tracks_to_songs(
             "title": title,
             "artist": artist,
             "album": album,
+            "netease_id": str(t.get("id", "") or ""),
             "cover_url": cover_url,
             "youtube_url": "",
             "start": format_seconds(cur_start),
             "end": format_seconds(cur_end),
             "file_path": "",
             "template": "annual",
-            "reason": f"《{title}》推荐：旋律抓耳，编曲精湛。",
+            "reason": "",
         })
 
     return songs
@@ -232,6 +233,73 @@ def search_netease_cover_url(
         except Exception:
             continue
     return None
+
+
+def search_netease_song_id(
+    title: str,
+    artist: str = "",
+    album: str = "",
+) -> str | None:
+    """Search NetEase Cloud Music by title/artist/album and return the best matching song ID."""
+    clean_artist = artist.split("/")[0].split(",")[0].strip()
+    queries = []
+    if title and clean_artist:
+        queries.append(f"{title} {clean_artist}")
+    if title:
+        queries.append(title)
+
+    for q in queries:
+        try:
+            resp = requests.post(
+                "https://music.163.com/api/search/get/web",
+                data={"s": q, "type": 1, "limit": 5, "offset": 0},
+                headers=HEADERS,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            songs = (resp.json().get("result") or {}).get("songs") or []
+            if not songs:
+                continue
+
+            best = songs[0]
+            album_lower = album.lower().strip()
+            artist_lower = clean_artist.lower()
+            for cand in songs:
+                c_album = ((cand.get("album") or {}).get("name") or "").lower()
+                c_artists = " ".join(
+                    a.get("name", "").lower() for a in (cand.get("artists") or [])
+                )
+                if album_lower and album_lower in c_album:
+                    best = cand
+                    break
+                if artist_lower and artist_lower in c_artists:
+                    best = cand
+                    break
+
+            sid = best.get("id")
+            if sid:
+                return str(sid)
+        except Exception:
+            continue
+    return None
+
+
+def fetch_netease_lyrics(song_id: int | str) -> tuple[str, str]:
+    """Fetch original LRC and Chinese translation LRC from NetEase Cloud Music."""
+    try:
+        resp = requests.get(
+            "https://music.163.com/api/song/lyric",
+            params={"id": str(song_id), "lv": 1, "tv": 1, "kv": -1},
+            headers=HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        orig_lrc = ((data.get("lrc") or {}).get("lyric") or "").strip()
+        trans_lrc = ((data.get("tlyric") or {}).get("lyric") or "").strip()
+        return orig_lrc, trans_lrc
+    except Exception:
+        return "", ""
 
 
 def import_netease_playlist(

@@ -19,6 +19,8 @@ import json
 import os
 import re
 import sys
+import time
+from typing import Callable
 import yt_dlp
 from netease import import_netease_playlist
 
@@ -26,6 +28,56 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PLAYLIST = os.path.join(BASE_DIR, "playlist.json")
 RAW_DIR = os.path.join(BASE_DIR, "raw")
 os.makedirs(RAW_DIR, exist_ok=True)
+
+# Cache the first working browser for Bilibili cookies during this process
+_CACHED_BILI_BROWSER: str | None = None
+_BILI_COOKIE_CANDIDATE_FILES = ("cookies.txt", "bilibili_cookies.txt")
+_BILI_DEFAULT_BROWSERS = ("edge", "chrome", "firefox")
+
+
+def is_bilibili_url(url: str) -> bool:
+    """Return True if the URL points to Bilibili."""
+    lower = (url or "").lower()
+    return "bilibili.com" in lower or "b23.tv" in lower
+
+
+def _is_cookie_load_error(err: Exception) -> bool:
+    """Detect browser cookie extraction failures (locked DB, DPAPI, missing profile)."""
+    msg = str(err).lower()
+    keywords = (
+        "could not copy",
+        "cookie",
+        "dpapi",
+        "failed to decrypt",
+        "cannot find",
+        "database is locked",
+        "permission denied",
+        "app-bound",
+    )
+    return any(k in msg for k in keywords)
+
+
+def _is_risk_control_error(err: Exception) -> bool:
+    """Detect Bilibili HTTP 412 risk-control errors."""
+    msg = str(err).lower()
+    return "412" in msg or "precondition failed" in msg
+
+
+def _find_local_cookie_file(explicit_file: str | None = None) -> str | None:
+    """Locate a Netscape cookies.txt file from explicit arg, env var, or project root."""
+    candidates = []
+    if explicit_file:
+        candidates.append(explicit_file)
+    env_file = os.environ.get("BILI_COOKIES_FILE", "").strip()
+    if env_file:
+        candidates.append(env_file)
+    for name in _BILI_COOKIE_CANDIDATE_FILES:
+        candidates.append(os.path.join(BASE_DIR, name))
+
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
 
 
 def to_relative_path(path: str, base_dir: str = BASE_DIR) -> str:
@@ -84,44 +136,179 @@ def search_youtube(query: str) -> str | None:
     return None
 
 
-def get_format_selector(quality: str = "1080") -> str:
+def get_format_selector(quality: str = "1080", prefer_sdr: bool = True) -> str:
     """
     Build yt-dlp format selector string.
-    Prioritizes AVC(H.264)+AAC for best Premiere Pro compatibility,
-    then falls back to any best video+audio.
+    Excludes AV1 in the primary branch so H.264(AVC) and HEVC compete by resolution & 60fps
+    (both have hardware decode in Premiere Pro). When prefer_sdr is True, prefers SDR streams
+    first to prevent HDR/Dolby Vision color washout in Rec.709 Premiere sequences.
     """
     if quality == "best":
-        return (
-            "bestvideo[vcodec^=avc]+bestaudio[acodec^=mp4a]/"
-            "bestvideo+bestaudio/best"
-        )
+        height_filter = ""
     elif quality == "720":
-        return (
-            "bestvideo[height<=720][vcodec^=avc]+bestaudio[acodec^=mp4a]/"
-            "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-        )
+        height_filter = "[height<=720]"
     else:  # default 1080
-        return (
-            "bestvideo[height<=1080][vcodec^=avc]+bestaudio[acodec^=mp4a]/"
-            "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+        height_filter = "[height<=1080]"
+
+    branches: list[str] = []
+    if prefer_sdr:
+        # 1. SDR + non-AV1 (AVC/HEVC compete together so 60fps HEVC beats 30fps AVC)
+        branches.append(
+            f"bestvideo{height_filter}[dynamic_range=SDR][vcodec!^=av01]+bestaudio[acodec^=mp4a]"
         )
+        branches.append(
+            f"bestvideo{height_filter}[dynamic_range=SDR][vcodec!^=av01]+bestaudio"
+        )
+    # 2. Fallback when extractor omits dynamic_range metadata (format_sort still prefers SDR)
+    branches.append(f"bestvideo{height_filter}[vcodec!^=av01]+bestaudio[acodec^=mp4a]")
+    branches.append(f"bestvideo{height_filter}[vcodec!^=av01]+bestaudio")
+    # 3. Final fallbacks including any codec / progressive stream
+    branches.append(f"bestvideo{height_filter}+bestaudio")
+    if height_filter:
+        branches.append(f"best{height_filter}")
+    branches.append("best")
+    return "/".join(branches)
 
 
-def download_mv(url: str, out_path: str, quality: str = "1080") -> bool:
+def get_format_sort(quality: str = "1080", prefer_sdr: bool = True) -> list[str]:
     """
-    Download video with high quality (1080p) and merge into mp4 container.
+    Build yt-dlp format_sort priority list:
+    SDR first (when prefer_sdr=True) -> target resolution -> highest fps (60fps over 30fps)
+    -> H.264 tie-breaker -> higher bitrate -> AAC audio.
     """
-    fmt = get_format_selector(quality)
-    opts = {
+    sort_keys: list[str] = []
+    if prefer_sdr:
+        # In yt-dlp format_sort, '+' sorts ascending (SDR before HDR)
+        sort_keys.append("+hdr")
+    if quality == "best":
+        sort_keys.append("res")
+    elif quality == "720":
+        sort_keys.append("res:720")
+    else:
+        sort_keys.append("res:1080")
+    sort_keys.extend(["fps", "vcodec:h264", "tbr", "acodec:aac"])
+    return sort_keys
+
+
+def _run_yt_dlp_with_retry(
+    url: str,
+    base_opts: dict,
+    max_attempts: int = 2,
+    log_fn: Callable[[str], None] | None = None,
+) -> None:
+    """
+    Execute yt-dlp download. On transient network/403/412 failures, re-creates YoutubeDL
+    after a short backoff so Bilibili playurl and signed CDN URLs are freshly resolved.
+    """
+    log = log_fn or print
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with yt_dlp.YoutubeDL(dict(base_opts)) as ydl:
+                ydl.download([url])
+            return
+        except Exception as err:
+            last_err = err
+            # Propagate cookie extraction errors immediately so caller can fall back
+            if _is_cookie_load_error(err):
+                raise
+            if _is_risk_control_error(err):
+                log("[B站风控] 触发 HTTP 412 风控，请稍等 1-2 分钟后重试或检查登录 Cookie")
+                if attempt < max_attempts:
+                    time.sleep(5)
+                    continue
+                raise RuntimeError(
+                    "触发 B 站 412 风控，请稍等 1-2 分钟后重试或检查 Cookie"
+                ) from err
+            if attempt < max_attempts:
+                log(f"[重试 {attempt}/{max_attempts - 1}] 重新解析播放地址并重试: {err}")
+                time.sleep(3)
+                continue
+            raise
+    if last_err:
+        raise last_err
+
+
+def download_mv(
+    url: str,
+    out_path: str,
+    quality: str = "1080",
+    cookies_browser: str | None = None,
+    cookies_file: str | None = None,
+    prefer_sdr: bool = True,
+    log_fn: Callable[[str], None] | None = None,
+) -> bool:
+    """
+    Download video with high quality (60fps & SDR preferred for Premiere Pro) and merge into MP4.
+    For Bilibili URLs, automatically uses cookies.txt or browser cookies when available
+    to unlock 1080p60/4K streams, falling back gracefully to guest mode if cookies cannot be read.
+    """
+    global _CACHED_BILI_BROWSER
+    log = log_fn or print
+
+    fmt = get_format_selector(quality, prefer_sdr=prefer_sdr)
+    fmt_sort = get_format_sort(quality, prefer_sdr=prefer_sdr)
+    opts: dict = {
         "format": fmt,
+        "format_sort": fmt_sort,
         "outtmpl": out_path,
         "merge_output_format": "mp4",
         "remote_components": ["ejs:github"],
         "quiet": False,
         "retries": 3,
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
+
+    if not is_bilibili_url(url):
+        _run_yt_dlp_with_retry(url, opts, max_attempts=2, log_fn=log)
+        return os.path.isfile(out_path)
+
+    # Bilibili-specific headers to prevent CDN 403
+    opts["http_headers"] = {"Referer": "https://www.bilibili.com/"}
+
+    # 1. Prefer explicit or local cookies.txt if present
+    resolved_file = _find_local_cookie_file(cookies_file)
+    if resolved_file:
+        log(f"[B站] 使用本地 Cookie 文件: {os.path.basename(resolved_file)}")
+        file_opts = dict(opts, cookiefile=resolved_file)
+        _run_yt_dlp_with_retry(url, file_opts, max_attempts=2, log_fn=log)
+        return os.path.isfile(out_path)
+
+    # 2. Otherwise try browser cookies unless explicitly disabled
+    browser_pref = (
+        cookies_browser
+        if cookies_browser is not None
+        else os.environ.get("BILI_COOKIES_BROWSER", "").strip()
+    )
+    if browser_pref.lower() in ("none", "off", "false", "0"):
+        _run_yt_dlp_with_retry(url, opts, max_attempts=2, log_fn=log)
+        return os.path.isfile(out_path)
+
+    if browser_pref:
+        browsers_to_try = [browser_pref.lower()]
+    elif _CACHED_BILI_BROWSER:
+        browsers_to_try = [_CACHED_BILI_BROWSER]
+    else:
+        browsers_to_try = list(_BILI_DEFAULT_BROWSERS)
+
+    for browser in browsers_to_try:
+        try:
+            browser_opts = dict(opts, cookiesfrombrowser=(browser,))
+            log(f"[B站] 尝试读取 {browser} 浏览器 Cookie 解锁高清/60帧...")
+            _run_yt_dlp_with_retry(url, browser_opts, max_attempts=2, log_fn=log)
+            _CACHED_BILI_BROWSER = browser
+            return os.path.isfile(out_path)
+        except Exception as err:
+            if _is_cookie_load_error(err):
+                log(f"[B站] 读取 {browser} Cookie 失败（可能浏览器正在运行或加密限制），尝试下一方式...")
+                continue
+            raise
+
+    # 3. Graceful fallback to guest mode when browser cookies are unavailable
+    log(
+        "[B站] 未能读取浏览器 Cookie，已回退为游客下载（画质可能受限于 480P/30fps；"
+        "如需 1080P60 请关闭浏览器重试，或导出 cookies.txt 放到项目根目录）"
+    )
+    _run_yt_dlp_with_retry(url, opts, max_attempts=2, log_fn=log)
     return os.path.isfile(out_path)
 
 
@@ -132,6 +319,21 @@ def main():
     parser.add_argument("--limit", type=int, default=10, help="网易云歌单歌曲数量上限")
     parser.add_argument("--quality", default="1080", choices=["720", "1080", "best"], help="视频画质 (默认 1080)")
     parser.add_argument("--force", action="store_true", help="强制重新下载（覆盖已有文件）")
+    parser.add_argument(
+        "--cookies-browser",
+        default=None,
+        help="B站 Cookie 来源浏览器 (如 edge, chrome, firefox；传 none 禁用)",
+    )
+    parser.add_argument(
+        "--cookies-file",
+        default=None,
+        help="Netscape 格式 cookies.txt 路径（默认自动检测项目根目录下的 cookies.txt）",
+    )
+    parser.add_argument(
+        "--allow-hdr",
+        action="store_true",
+        help="允许下载 HDR 流（默认优先 SDR 以防 Premiere Pro Rec.709 序列偏色）",
+    )
     args = parser.parse_args()
 
     if args.netease:
@@ -147,6 +349,7 @@ def main():
         data = json.load(f)
 
     changed = False
+    bili_downloads = 0
     for song in data["songs"]:
         title, artist = song["title"], song["artist"]
         if args.only and args.only.lower() not in title.lower():
@@ -154,7 +357,7 @@ def main():
 
         out_path = os.path.join(RAW_DIR, slug(title, artist) + ".mp4")
 
-        # 如果已有文件且未指定 --force，跳过；若指定 --force 则删除旧文件重新下载
+        # Skip existing file unless --force is specified
         existing_path = resolve_file_path(song.get("file_path", ""))
         if existing_path and os.path.isfile(existing_path):
             if not args.force:
@@ -168,7 +371,7 @@ def main():
 
         url = song.get("youtube_url") or ""
         if not url:
-            # 搜索时使用精炼关键词，避免长标题影响匹配
+            # Trim long titles for cleaner YouTube search matching
             clean_title = title.split("(")[0].split("（")[0].strip()[:40]
             query = f"{clean_title} {artist} official MV"
             print(f"[搜索] {query} ...")
@@ -178,9 +381,22 @@ def main():
             print(f"[WARN] 找不到: {title}，跳过")
             continue
 
+        # Throttle consecutive Bilibili requests to avoid HTTP 412 risk control
+        if is_bilibili_url(url) and bili_downloads > 0:
+            time.sleep(2.0)
+
         print(f"[下载高清 {args.quality}p] {title} → {out_path}")
         try:
-            if download_mv(url, out_path, quality=args.quality):
+            if download_mv(
+                url,
+                out_path,
+                quality=args.quality,
+                cookies_browser=args.cookies_browser,
+                cookies_file=args.cookies_file,
+                prefer_sdr=not args.allow_hdr,
+            ):
+                if is_bilibili_url(url):
+                    bili_downloads += 1
                 song["file_path"] = to_relative_path(out_path)
                 changed = True
                 print(f"[OK] {out_path}")

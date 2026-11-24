@@ -13,6 +13,7 @@ downloads/
 *.jpg
 *.jpeg
 *.png
+!templates/progress_bar.png
 *.lrc
 
 # Temporary script logs & scratch AE files
@@ -29,6 +30,10 @@ __pycache__/
 env/
 venv/
 ENV/
+
+# Cookies & credentials
+cookies.txt
+bilibili_cookies.txt
 
 # System & IDE files
 .DS_Store

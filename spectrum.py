@@ -9,6 +9,7 @@ it blends naturally with any cover palette (bright white, dark, or vivid).
 
 from __future__ import annotations
 
+import math
 import subprocess
 from pathlib import Path
 from typing import Callable
@@ -147,12 +148,20 @@ def compute_bar_heights(samples: np.ndarray, num_frames: int, fps: int = 30) -> 
         padded = np.pad(norm_bars, ((0, 0), (1, 1)), mode="edge")
         norm_bars = 0.2 * padded[:, :-2] + 0.6 * padded[:, 1:-1] + 0.2 * padded[:, 2:]
 
+    # Frame-rate-independent temporal attack/decay damping (snappy rise, silky fall at 30/60fps)
+    dt = 30.0 / max(1.0, float(fps))
+    attack_keep = 0.42 ** dt
+    decay_keep = 0.78 ** dt
     smoothed = np.zeros_like(norm_bars)
     prev = np.zeros(NUM_BARS, dtype=np.float32)
     for f in range(num_frames):
         cur = norm_bars[f]
         rising = cur > prev
-        prev = np.where(rising, prev * 0.42 + cur * 0.58, prev * 0.78 + cur * 0.22)
+        prev = np.where(
+            rising,
+            prev * attack_keep + cur * (1.0 - attack_keep),
+            prev * decay_keep + cur * (1.0 - decay_keep),
+        )
         smoothed[f] = prev
 
     return smoothed
@@ -161,7 +170,7 @@ def compute_bar_heights(samples: np.ndarray, num_frames: int, fps: int = 30) -> 
 def render_spectrum_mov(
     song: SongItem,
     project_root: Path,
-    fps: int = 30,
+    fps: int = 60,
     log: Callable[[str], None] | None = None,
 ) -> Path | None:
     """Render a transparent 186x68 frosted-glass RGBA .mov audio spectrum overlay for a song."""
@@ -183,7 +192,9 @@ def render_spectrum_mov(
     start_sec = parse_time_str(song.start)
     end_sec = parse_time_str(song.end)
     dur_sec = max(1.0, end_sec - start_sec)
-    num_frames = max(1, int(round(dur_sec * fps)))
+    # Add 15 extra tail frames so Pr never hits EOF frame-substitution recursion on float rounding
+    core_frames = max(1, int(math.ceil(dur_sec * fps)))
+    num_frames = core_frames + 15
 
     out_dir = project_root / "processed"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -192,12 +203,13 @@ def render_spectrum_mov(
 
     # Precompute frosted-glass blurred texture from the song's album cover
     frosted_rgb = build_frosted_cover_texture(song, project_root)
-    samples = extract_mono_pcm(ffmpeg, src_path, start_sec, dur_sec)
+    samples = extract_mono_pcm(ffmpeg, src_path, start_sec, dur_sec + 0.5)
     bars = compute_bar_heights(samples, num_frames, fps=fps)
 
     # Evenly distribute 20 bars across 186px with 8px side margins
     xs = np.linspace(8, SPEC_W - 8 - BAR_W, NUM_BARS).astype(np.int32)
 
+    # Apple ProRes 4444 with Alpha: native high-speed Premiere Pro mezzanine codec (zero frame-recursion stalls)
     cmd = [
         ffmpeg,
         "-y",
@@ -212,9 +224,17 @@ def render_spectrum_mov(
         "-i",
         "pipe:0",
         "-c:v",
-        "png",
+        "prores_ks",
+        "-profile:v",
+        "4444",
+        "-vendor",
+        "apl0",
+        "-bits_per_mb",
+        "4000",
         "-pix_fmt",
-        "rgba",
+        "yuva444p10le",
+        "-alpha_bits",
+        "8",
         str(out_path),
     ]
     proc = subprocess.Popen(
