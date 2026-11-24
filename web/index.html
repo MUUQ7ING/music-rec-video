@@ -69,6 +69,12 @@
           导入网易云歌单
         </button>
 
+        <!-- NetEase Audio Source Settings & Batch Modal Trigger -->
+        <button @click="openNeteaseAudioModal" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full" :class="neteaseAudioCfg.configured ? 'bg-emerald-400' : 'bg-amber-400'"></span>
+          <span>网易云音源</span>
+        </button>
+
         <!-- Reorder Playlist Modal Trigger -->
         <button @click="openReorderModal" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition flex items-center gap-1.5">
           <span>⇅</span>
@@ -199,7 +205,18 @@
             </div>
 
             <!-- Download Status Badge -->
-            <div class="flex items-center space-x-3">
+            <div class="flex flex-wrap items-center gap-2">
+              <a
+                v-if="song.has_audio"
+                :href="`/api/audio/${idx}`"
+                target="_blank"
+                title="点击下载或试听已保存的网易云纯音频"
+                class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border border-sky-500/25 transition"
+              >
+                <span>🎵</span>
+                <span>纯音频 ({{ song.audio_size_mb }} MB)</span>
+              </a>
+
               <span v-if="song.has_file" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                 <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
                 已下载 1080p ({{ song.file_size_mb }} MB)
@@ -211,6 +228,26 @@
               <span v-else class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 border border-zinc-700">
                 待选视频方案
               </span>
+
+              <!-- NetEase Audio Only Button -->
+              <button
+                @click="downloadNeteaseSingle(idx, 'audio')"
+                :disabled="status.is_downloading"
+                title="通过网易云音源仅下载高音质纯音频到 audio/ 目录（不覆盖 MV）"
+                class="px-2.5 py-1 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-sky-900/50 disabled:opacity-50 text-sky-300 border border-sky-500/30 transition"
+              >
+                🎵 网易云音频
+              </button>
+
+              <!-- NetEase Audio + Cover Compose 1080p MP4 Button -->
+              <button
+                @click="downloadNeteaseSingle(idx, 'video')"
+                :disabled="status.is_downloading"
+                title="下载网易云高音质音频 + 官方专辑封面，自动合成为 1080p MP4 并接入 PR 剪辑管线"
+                class="px-2.5 py-1 text-xs font-medium rounded-lg bg-red-950/60 hover:bg-red-900/60 disabled:opacity-50 text-red-200 border border-red-500/35 transition"
+              >
+                💿 网易云合成MV
+              </button>
 
               <!-- Single Download Button -->
               <button 
@@ -803,6 +840,102 @@
       </div>
     </div>
 
+    <!-- NetEase Audio Source Settings & Batch Download Modal -->
+    <div v-if="showNeteaseAudioModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-lg w-full shadow-2xl overflow-hidden">
+        <div class="px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
+          <h3 class="text-sm font-bold text-white flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full" :class="neteaseAudioCfg.configured ? 'bg-emerald-400' : 'bg-amber-400'"></span>
+            网易云音源设置与批量下载
+          </h3>
+          <button @click="showNeteaseAudioModal = false" class="text-zinc-400 hover:text-white text-sm">✕</button>
+        </div>
+
+        <div class="p-6 space-y-5 text-xs">
+          <!-- Status Banner -->
+          <div class="px-3.5 py-2.5 rounded-xl border flex items-center justify-between"
+            :class="neteaseAudioCfg.configured ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200' : 'bg-amber-500/10 border-amber-500/30 text-amber-200'">
+            <div>
+              <div class="font-medium">{{ neteaseAudioCfg.configured ? '音源 API 已就绪' : '尚未配置音源 API' }}</div>
+              <div v-if="neteaseAudioCfg.configured" class="text-[11px] opacity-80 font-mono mt-0.5">
+                {{ neteaseAudioCfg.api_url }} · Key: {{ neteaseAudioCfg.api_key_masked }}
+              </div>
+            </div>
+            <span class="px-2 py-0.5 rounded bg-black/30 font-mono text-[11px]">{{ neteaseAudioQuality }}</span>
+          </div>
+
+          <!-- Quality & Batch Operations -->
+          <div class="space-y-3 bg-zinc-950/70 border border-zinc-800 rounded-xl p-4">
+            <div class="flex items-center justify-between">
+              <label class="text-zinc-300 font-medium">期望下载音质（无损不可用时自动降级）</label>
+              <select v-model="neteaseAudioQuality" @change="saveNeteaseQualityOnly" class="px-2.5 py-1 bg-zinc-900 border border-zinc-700 rounded-lg text-zinc-200 font-mono">
+                <option value="master">master (超清母带)</option>
+                <option value="atmos">atmos (沉浸环绕声)</option>
+                <option value="hires">hires (Hi-Res)</option>
+                <option value="flac24bit">flac24bit (24bit 无损)</option>
+                <option value="flac">flac (无损 FLAC)</option>
+                <option value="320k">320k (极高 MP3)</option>
+                <option value="128k">128k (标准 MP3)</option>
+              </select>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+              <button
+                @click="downloadNeteaseBatch('audio', true)"
+                :disabled="status.is_downloading || !neteaseAudioCfg.configured"
+                class="px-3 py-2 rounded-lg bg-sky-900/50 hover:bg-sky-800/60 disabled:opacity-40 text-sky-200 border border-sky-500/30 font-medium transition"
+              >
+                🎵 批量下载纯音频 (补全缺失)
+              </button>
+              <button
+                @click="downloadNeteaseBatch('video', true)"
+                :disabled="status.is_downloading || !neteaseAudioCfg.configured"
+                class="px-3 py-2 rounded-lg bg-red-900/50 hover:bg-red-800/60 disabled:opacity-40 text-red-100 border border-red-500/35 font-medium transition"
+              >
+                💿 批量封面合成 MV (仅无视频曲目)
+              </button>
+            </div>
+            <p class="text-[11px] text-zinc-500 leading-relaxed">
+              纯音频保存在 <span class="font-mono text-zinc-400">audio/</span> 目录；封面合成 MV 会自动拉取官方专辑封面封装为 1080p MP4 并执行 -14 LUFS 响度统一，可直接导入 Premiere Pro。
+            </p>
+          </div>
+
+          <!-- API Configuration Form -->
+          <div class="space-y-3 border-t border-zinc-800 pt-4">
+            <div class="font-medium text-zinc-300">更新音源配置（仅保存在本地 gitignored 配置文件）</div>
+            <div class="grid grid-cols-1 gap-2.5">
+              <input
+                type="text"
+                v-model="neteaseFormUrl"
+                placeholder="API_URL，例如 https://c.wwwweb.top"
+                class="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 font-mono focus:outline-none focus:border-brand-500"
+              />
+              <input
+                type="password"
+                v-model="neteaseFormKey"
+                placeholder="留空则保持当前 API_KEY 不变"
+                class="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 font-mono focus:outline-none focus:border-brand-500"
+              />
+              <textarea
+                v-model="neteaseFormScript"
+                rows="2"
+                placeholder="可选：直接粘贴洛雪音源 .js 脚本全文，保存时自动提取 API_URL 和 API_KEY"
+                class="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 font-mono focus:outline-none focus:border-brand-500 resize-y"
+              ></textarea>
+            </div>
+            <div class="flex justify-end gap-2 pt-1">
+              <button @click="showNeteaseAudioModal = false" class="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition">
+                关闭
+              </button>
+              <button @click="saveNeteaseAudioConfig" :disabled="savingNeteaseAudioCfg" class="px-4 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 disabled:opacity-50 text-white font-medium transition">
+                {{ savingNeteaseAudioCfg ? '保存中...' : '保存音源配置' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <script>
@@ -825,6 +958,15 @@
         const neteaseLimit = ref(8);
         const neteaseAppend = ref(false);
         const importingNetease = ref(false);
+
+        // NetEase Audio Source State
+        const showNeteaseAudioModal = ref(false);
+        const neteaseAudioCfg = ref({ configured: false, api_url: '', api_key_masked: '', default_quality: 'flac', qualities: [] });
+        const neteaseAudioQuality = ref('flac');
+        const neteaseFormUrl = ref('');
+        const neteaseFormKey = ref('');
+        const neteaseFormScript = ref('');
+        const savingNeteaseAudioCfg = ref(false);
 
         // Bilibili QR Login State
         const biliUser = ref({ logged_in: false, uname: '', is_vip: false, vip_label: '' });
@@ -1428,10 +1570,139 @@
           }
         };
 
+        const loadNeteaseAudioConfig = async () => {
+          try {
+            const res = await fetch('/api/netease_audio/config');
+            if (res.ok) {
+              const data = await res.json();
+              neteaseAudioCfg.value = data;
+              neteaseAudioQuality.value = data.default_quality || 'flac';
+              neteaseFormUrl.value = data.api_url || '';
+            }
+          } catch (e) {
+            console.error('Failed to load NetEase audio config:', e);
+          }
+        };
+
+        const openNeteaseAudioModal = async () => {
+          await loadNeteaseAudioConfig();
+          neteaseFormKey.value = '';
+          neteaseFormScript.value = '';
+          showNeteaseAudioModal.value = true;
+        };
+
+        const saveNeteaseQualityOnly = async () => {
+          try {
+            const res = await fetch('/api/netease_audio/config', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ default_quality: neteaseAudioQuality.value }),
+            });
+            if (res.ok) {
+              neteaseAudioCfg.value = await res.json();
+            }
+          } catch (e) {
+            console.error('Failed to save quality:', e);
+          }
+        };
+
+        const saveNeteaseAudioConfig = async () => {
+          savingNeteaseAudioCfg.value = true;
+          try {
+            const payload = {
+              default_quality: neteaseAudioQuality.value,
+            };
+            if (neteaseFormUrl.value.trim()) payload.api_url = neteaseFormUrl.value.trim();
+            if (neteaseFormKey.value.trim()) payload.api_key = neteaseFormKey.value.trim();
+            if (neteaseFormScript.value.trim()) payload.script_text = neteaseFormScript.value.trim();
+
+            const res = await fetch('/api/netease_audio/config', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              alert(data.detail || '保存配置失败');
+              return;
+            }
+            neteaseAudioCfg.value = data;
+            neteaseFormUrl.value = data.api_url || '';
+            neteaseFormKey.value = '';
+            neteaseFormScript.value = '';
+            alert('网易云音源配置已保存');
+          } catch (e) {
+            alert('保存音源配置出错: ' + e);
+          } finally {
+            savingNeteaseAudioCfg.value = false;
+          }
+        };
+
+        const downloadNeteaseSingle = async (idx, mode) => {
+          if (!neteaseAudioCfg.value.configured) {
+            alert('请先在顶部「网易云音源」中配置音源 API');
+            openNeteaseAudioModal();
+            return;
+          }
+          try {
+            await savePlaylist();
+            const res = await fetch('/api/netease_audio/download_single', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                index: idx,
+                mode,
+                quality: neteaseAudioQuality.value,
+                force: true,
+              }),
+            });
+            const data = await res.json();
+            if (res.ok) {
+              showLogs.value = true;
+              pollStatus();
+            } else {
+              alert(data.message || data.detail || '启动网易云下载失败');
+            }
+          } catch (e) {
+            alert('请求网易云下载出错: ' + e);
+          }
+        };
+
+        const downloadNeteaseBatch = async (mode, missingOnly = true) => {
+          const desc = mode === 'video'
+            ? '为尚未有视频素材的歌曲下载网易云高音质音频，并用专辑封面合成为 1080p MP4'
+            : '批量下载歌单中缺失的网易云高音质纯音频到 audio/ 目录';
+          if (!confirm(`确定${desc}？（期望音质: ${neteaseAudioQuality.value}）`)) return;
+          try {
+            await savePlaylist();
+            const res = await fetch('/api/netease_audio/download_all', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                mode,
+                quality: neteaseAudioQuality.value,
+                force: !missingOnly,
+                missing_only: missingOnly,
+              }),
+            });
+            const data = await res.json();
+            if (res.ok) {
+              showNeteaseAudioModal.value = false;
+              showLogs.value = true;
+              pollStatus();
+            } else {
+              alert(data.message || data.detail || '启动批量任务失败');
+            }
+          } catch (e) {
+            alert('请求批量下载出错: ' + e);
+          }
+        };
+
         onMounted(() => {
           loadPlaylistData();
           loadRenderers();
           loadBiliStatus();
+          loadNeteaseAudioConfig();
           pollStatus();
         });
 
@@ -1449,6 +1720,18 @@
           neteaseLimit,
           neteaseAppend,
           importingNetease,
+          showNeteaseAudioModal,
+          neteaseAudioCfg,
+          neteaseAudioQuality,
+          neteaseFormUrl,
+          neteaseFormKey,
+          neteaseFormScript,
+          savingNeteaseAudioCfg,
+          openNeteaseAudioModal,
+          saveNeteaseQualityOnly,
+          saveNeteaseAudioConfig,
+          downloadNeteaseSingle,
+          downloadNeteaseBatch,
           biliUser,
           showBiliLoginModal,
           biliQrLoading,

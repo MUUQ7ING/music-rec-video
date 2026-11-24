@@ -1,5 +1,6 @@
 # Media files & downloads
 raw/
+audio/
 covers/
 processed/
 temp/
@@ -9,6 +10,7 @@ downloads/
 *.mov
 *.m4a
 *.mp3
+*.flac
 *.wav
 *.jpg
 *.jpeg
@@ -34,6 +36,7 @@ ENV/
 # Cookies & credentials
 cookies.txt
 bilibili_cookies.txt
+music_source_config.json
 
 # System & IDE files
 .DS_Store

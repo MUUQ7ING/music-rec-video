@@ -33,6 +33,12 @@ from download import (
     to_relative_path,
 )
 from netease import import_netease_playlist
+from netease_audio import (
+    download_netease_for_song,
+    get_music_source_status,
+    parse_lx_script_text,
+    save_music_source_config,
+)
 from bilibili import (
     search_bilibili,
     generate_bilibili_qr,
@@ -131,6 +137,20 @@ def stream_song_media(index: int):
         if fp and os.path.isfile(fp):
             return FileResponse(fp, media_type="video/mp4")
     raise HTTPException(status_code=404, detail="Local media file not found")
+
+
+@app.get("/api/audio/{index}")
+def download_song_audio_file(index: int):
+    """Download or stream the saved pure NetEase audio file for a song."""
+    data = load_playlist()
+    songs = data.get("songs", [])
+    if index < 0 or index >= len(songs):
+        raise HTTPException(status_code=404, detail="Song index out of range")
+    song = songs[index]
+    ap = resolve_file_path(song.get("audio_path", ""))
+    if ap and os.path.isfile(ap):
+        return FileResponse(ap, filename=os.path.basename(ap))
+    raise HTTPException(status_code=404, detail="Local audio file not found")
 
 
 @app.post("/api/spectrum/{index}")
@@ -246,6 +266,15 @@ def get_playlist_api():
         song["has_lyrics"] = bool(lp and os.path.isfile(lp))
         bp = resolve_file_path(song.get("beat_path", ""))
         song["has_beat"] = bool(bp and os.path.isfile(bp))
+        ap = resolve_file_path(song.get("audio_path", ""))
+        song["has_audio"] = bool(ap and os.path.isfile(ap))
+        if song["has_audio"]:
+            try:
+                song["audio_size_mb"] = round(os.path.getsize(ap) / 1024 / 1024, 2)
+            except Exception:
+                song["audio_size_mb"] = 0
+        else:
+            song["audio_size_mb"] = 0
     return data
 
 
@@ -581,6 +610,194 @@ def download_all_api(req: DownloadAllRequest):
     )
     t.start()
     return {"status": "started", "message": "已在后台启动全量下载"}
+
+
+class NeteaseAudioConfigRequest(BaseModel):
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+    default_quality: Optional[str] = None
+    script_text: Optional[str] = None
+
+
+@app.get("/api/netease_audio/config")
+def get_netease_audio_config_api():
+    """Return NetEase custom audio source status and non-sensitive config."""
+    return get_music_source_status()
+
+
+@app.post("/api/netease_audio/config")
+def update_netease_audio_config_api(req: NeteaseAudioConfigRequest):
+    """Update NetEase custom audio source config directly or by parsing an LX Music JS script."""
+    api_url = req.api_url
+    api_key = req.api_key
+    if req.script_text and req.script_text.strip():
+        parsed = parse_lx_script_text(req.script_text)
+        if not parsed.get("api_url") and not parsed.get("api_key"):
+            raise HTTPException(status_code=400, detail="未能从脚本文本中解析出 API_URL 或 API_KEY")
+        api_url = parsed.get("api_url") or api_url
+        api_key = parsed.get("api_key") or api_key
+
+    save_music_source_config(
+        api_url=api_url,
+        api_key=api_key,
+        default_quality=req.default_quality,
+    )
+    log_task("✅ 已更新网易云音源配置")
+    return get_music_source_status()
+
+
+class NeteaseAudioSingleRequest(BaseModel):
+    index: int
+    mode: str = "video"  # "audio" | "video"
+    quality: Optional[str] = None
+    force: bool = True
+
+
+def _worker_netease_audio_single(index: int, mode: str, quality: Optional[str], force: bool):
+    """Background worker to download NetEase audio (and optionally compose cover MP4) for one song."""
+    with task_lock:
+        tasks_state["is_downloading"] = True
+        tasks_state["progress_percent"] = 10
+    try:
+        playlist = load_playlist_model(PLAYLIST_FILE)
+        if index < 0 or index >= len(playlist.songs):
+            log_task("无效的歌曲序号")
+            return
+        song = playlist.songs[index]
+        mode_label = "封面合成 1080p MP4" if mode == "video" else "纯音频"
+        with task_lock:
+            tasks_state["current_song"] = f"网易云({mode_label}): {song.artist} - {song.title}"
+
+        log_task(f"🎵 开始下载网易云音源 ({mode_label}): {song.artist} - {song.title}")
+        res = download_netease_for_song(
+            song=song,
+            base_dir=BASE_PATH,
+            mode=mode,
+            quality=quality,
+            force=force,
+            width=playlist.resolution.width,
+            height=playlist.resolution.height,
+            fps=min(playlist.fps, 30),
+            log_fn=log_task,
+        )
+        save_playlist_model(playlist, PLAYLIST_FILE)
+        with task_lock:
+            tasks_state["progress_percent"] = 80
+
+        if mode == "video":
+            _preprocess_after_download(index, refresh_norm=True)
+            log_task(f"✅ 网易云音源 + 封面合成完成: {song.title} ({res['quality']})")
+        else:
+            log_task(f"✅ 网易云纯音频下载完成: {song.title} ({res['quality']} -> {res['audio_path']})")
+
+        with task_lock:
+            tasks_state["progress_percent"] = 100
+    except Exception as e:
+        log_task(f"❌ 网易云音源下载失败: {e}")
+    finally:
+        with task_lock:
+            tasks_state["is_downloading"] = False
+            tasks_state["current_song"] = ""
+
+
+@app.post("/api/netease_audio/download_single")
+def netease_audio_download_single_api(req: NeteaseAudioSingleRequest):
+    """Trigger single-song NetEase audio download (pure audio or cover-composed 1080p MP4)."""
+    if tasks_state["is_downloading"]:
+        return JSONResponse(status_code=400, content={"message": "当前已有后台任务在进行中"})
+    mode = "audio" if req.mode == "audio" else "video"
+    t = threading.Thread(
+        target=_worker_netease_audio_single,
+        args=(req.index, mode, req.quality, req.force),
+        daemon=True,
+    )
+    t.start()
+    return {"status": "started", "message": "已在后台启动网易云音源下载"}
+
+
+class NeteaseAudioBatchRequest(BaseModel):
+    mode: str = "video"  # "audio" | "video"
+    quality: Optional[str] = None
+    force: bool = False
+    missing_only: bool = False
+
+
+def _worker_netease_audio_batch(mode: str, quality: Optional[str], force: bool, missing_only: bool):
+    """Background worker for batch NetEase audio download / cover-video composition."""
+    with task_lock:
+        tasks_state["is_downloading"] = True
+        tasks_state["progress_percent"] = 0
+    try:
+        playlist = load_playlist_model(PLAYLIST_FILE)
+        total = max(1, len(playlist.songs))
+        processed_requests = 0
+
+        for i, song in enumerate(playlist.songs):
+            with task_lock:
+                tasks_state["current_song"] = f"网易云 [{i+1}/{len(playlist.songs)}] {song.title}"
+                tasks_state["progress_percent"] = int((i / total) * 100)
+
+            if missing_only:
+                if mode == "video":
+                    existing_video = resolve_file_path(song.file_path)
+                    if existing_video and os.path.isfile(existing_video):
+                        log_task(f"[跳过] 已有视频素材: {song.title}")
+                        continue
+                else:
+                    existing_audio = resolve_file_path(song.audio_path)
+                    if existing_audio and os.path.isfile(existing_audio):
+                        log_task(f"[跳过] 已有纯音频: {song.title}")
+                        continue
+
+            # Throttle consecutive API calls to avoid HTTP 429 rate limiting
+            if processed_requests > 0:
+                time.sleep(1.5)
+
+            try:
+                res = download_netease_for_song(
+                    song=song,
+                    base_dir=BASE_PATH,
+                    mode=mode,
+                    quality=quality,
+                    force=force,
+                    width=playlist.resolution.width,
+                    height=playlist.resolution.height,
+                    fps=min(playlist.fps, 30),
+                    log_fn=log_task,
+                )
+                processed_requests += 1
+                save_playlist_model(playlist, PLAYLIST_FILE)
+                if mode == "video":
+                    _preprocess_after_download(i, refresh_norm=True)
+                log_task(f"✓ [{i+1}/{len(playlist.songs)}] {song.title} ({res['quality']})")
+            except Exception as song_err:
+                processed_requests += 1
+                log_task(f"✗ 网易云下载异常 ({song.title}): {song_err}")
+
+        with task_lock:
+            tasks_state["progress_percent"] = 100
+        log_task("🎉 网易云音源批量任务完成！")
+    except Exception as e:
+        log_task(f"❌ 网易云批量任务中断: {e}")
+    finally:
+        with task_lock:
+            tasks_state["is_downloading"] = False
+            tasks_state["current_song"] = ""
+
+
+@app.post("/api/netease_audio/download_all")
+def netease_audio_download_all_api(req: NeteaseAudioBatchRequest):
+    """Trigger batch NetEase audio download or cover-video composition."""
+    if tasks_state["is_downloading"]:
+        return JSONResponse(status_code=400, content={"message": "当前已有后台任务在进行中"})
+    mode = "audio" if req.mode == "audio" else "video"
+    t = threading.Thread(
+        target=_worker_netease_audio_batch,
+        args=(mode, req.quality, req.force, req.missing_only),
+        daemon=True,
+    )
+    t.start()
+    return {"status": "started", "message": "已在后台启动网易云批量下载"}
 
 
 @app.get("/api/status")

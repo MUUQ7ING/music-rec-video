@@ -334,6 +334,16 @@ def main():
         action="store_true",
         help="允许下载 HDR 流（默认优先 SDR 以防 Premiere Pro Rec.709 序列偏色）",
     )
+    parser.add_argument(
+        "--netease-fallback",
+        action="store_true",
+        help="当 YouTube/B站 搜索或下载 MV 失败时，自动使用网易云音源 + 专辑封面合成 1080p MP4",
+    )
+    parser.add_argument(
+        "--netease-quality",
+        default="flac",
+        help="网易云兜底音源期望音质 (如 flac, 320k, 128k，默认 flac 自动降级)",
+    )
     args = parser.parse_args()
 
     if args.netease:
@@ -378,7 +388,32 @@ def main():
             url = search_youtube(query)
 
         if not url:
-            print(f"[WARN] 找不到: {title}，跳过")
+            if args.netease_fallback:
+                print(f"[兜底] 未找到 MV，尝试用网易云音源 + 封面合成: {title}")
+                try:
+                    from pathlib import Path
+                    from netease_audio import download_netease_for_song
+                    from schema import SongItem
+
+                    song_model = SongItem.model_validate(song)
+                    res = download_netease_for_song(
+                        song_model,
+                        base_dir=Path(BASE_DIR),
+                        mode="video",
+                        quality=args.netease_quality,
+                        force=args.force,
+                    )
+                    song["netease_id"] = song_model.netease_id
+                    song["audio_path"] = res["audio_path"]
+                    song["file_path"] = res["video_path"]
+                    if song_model.cover_path:
+                        song["cover_path"] = song_model.cover_path
+                    changed = True
+                    print(f"[OK] 网易云合成完成: {res['video_path']}")
+                except Exception as ne:
+                    print(f"[ERROR] 网易云兜底失败 ({title}): {ne}")
+            else:
+                print(f"[WARN] 找不到: {title}，跳过")
             continue
 
         # Throttle consecutive Bilibili requests to avoid HTTP 412 risk control

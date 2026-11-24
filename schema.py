@@ -57,6 +57,7 @@ class SongItem(BaseModel):
     start: str = "0:00"
     end: str = "0:30"
     file_path: str = ""
+    audio_path: str = ""
     normalized_path: str = ""
     spectrum_path: str = ""
     cover_url: str = ""
